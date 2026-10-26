@@ -187,6 +187,15 @@ class HandoffStore:
                 result.append(json.loads(response.read()))
         return result
 
+    def remote_transition(self, base_url, handoff_id, action, *, token=None):
+        request = urllib.request.Request(
+            base_url.rstrip("/") + f"/api/v1/handoffs/{handoff_id}/{action}",
+            data=b"{}", method="POST", headers={"Content-Type": "application/json", "Accept": "application/json"})
+        if token:
+            request.add_header("X-API-Key", token)
+        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+            return json.loads(response.read())
+
     @staticmethod
     def _write(path, package):
         temp = path.with_suffix(".json.tmp")

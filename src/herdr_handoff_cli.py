@@ -97,7 +97,23 @@ def main(argv=None):
         package = store.get(args.handoff_id)
         if package.get("state") != "queued":
             raise SystemExit(f"handoff must be queued before launch (state={package.get('state')})")
+        control_url = os.environ.get("HERDR_CONTROL_PLANE_URL")
+        control_token = os.environ.get("HERDR_API_KEY")
+        dashboard = "not_configured"
+        if control_url:
+            store.sync(control_url, token=control_token, handoff_id=args.handoff_id)
         out = launch(package, root=store.root, parent_pane=args.parent_pane, cwd=args.cwd)
+        store.transition(args.handoff_id, "claimed", actor="local-launch")
+        store.transition(args.handoff_id, "accepted", actor="local-launch")
+        store.transition(args.handoff_id, "in_progress", actor="local-launch")
+        if control_url:
+            try:
+                for action in ("claim", "accept", "start"):
+                    store.remote_transition(control_url, args.handoff_id, action, token=control_token)
+                dashboard = "in_progress"
+            except Exception as exc:  # pane already exists; preserve local result and expose sync failure
+                dashboard = f"sync_failed:{type(exc).__name__}"
+        out["dashboard"] = dashboard
     else:
         out = store.transition(args.handoff_id, args.state, actor=args.actor)
     print(json.dumps(out, indent=2, sort_keys=True))
