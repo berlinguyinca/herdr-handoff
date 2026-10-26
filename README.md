@@ -18,6 +18,11 @@ The installed command namespace is `/herdr::...`:
 No top-level slash aliases are installed, so existing harness commands are not
 overwritten.
 
+`/herdr::to*` splits the current Herdr pane, starts the selected harness
+interactively in the child pane, sends the bounded resume prompt, and reports
+the pane/handoff metadata for dashboard visibility. It requires
+`HERDR_PANE_ID`; it never starts a detached process.
+
 The package works offline using a filesystem outbox and can be synchronized to
 the Herdr Engineering control plane when available. Install the skill for all
 four harnesses with:

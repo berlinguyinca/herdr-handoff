@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from herdr_handoff import HandoffStore, build_handoff, resume_prompt
+from herdr_handoff import HandoffStore, build_handoff, build_launch_plan, resume_prompt
 
 
 def test_build_handoff_redacts_sensitive_context_and_preserves_refs():
@@ -62,3 +62,14 @@ def test_resume_prompt_is_bounded_and_contains_target_work(tmp_path: Path):
     assert "Review artifact" in prompt
     assert "art_1" in prompt
     assert "publish" in prompt.lower()
+
+
+def test_launch_plan_splits_current_pane_and_starts_target_interactively():
+    plan = build_launch_plan("wC:p1", "claude", "handoff_" + "a" * 32,
+                             "/tmp/handoff.json", model_hint="sonnet", cwd="/work")
+    assert plan["split"][0:4] == ["herdr", "pane", "split", "wC:p1"]
+    assert "--direction" in plan["split"] and "right" in plan["split"]
+    assert plan["run_binary"] == "claude"
+    assert "--model sonnet" in plan["run_command"]
+    assert "/tmp/handoff.json" in plan["run_command"]
+    assert plan["metadata"]["handoff_id"].startswith("handoff_")

@@ -32,6 +32,7 @@ _STATES = {
     "expired": set(),
     "failed": {"queued", "cancelled"},
 }
+_HARNESS_BIN = {"claude": "claude", "pi": "pi", "codex": "codex", "opencode": "opencode"}
 
 
 def _now() -> str:
@@ -94,6 +95,35 @@ def resume_prompt(package):
         f"Pinned artifacts: {json.dumps(package.get('artifacts') or [], sort_keys=True)}",
         "Do not publish or expose private infrastructure without explicit approval.",
     ])
+
+
+def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, model_hint=None, cwd=None):
+    """Build safe Herdr CLI operations for an interactive same-tab handoff."""
+    if not isinstance(parent_pane, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}", parent_pane):
+        raise ValueError("HERDR_PANE_ID is required and must be a valid pane id")
+    if target_harness not in _HARNESS_BIN:
+        raise ValueError("unsupported target harness")
+    if not re.fullmatch(r"handoff_[a-f0-9]{32}", handoff_id):
+        raise ValueError("invalid handoff_id")
+    if not isinstance(handoff_file, str) or not handoff_file or "\n" in handoff_file:
+        raise ValueError("handoff_file is required")
+    binary = _HARNESS_BIN[target_harness]
+    args = [binary]
+    if model_hint:
+        if not re.fullmatch(r"[A-Za-z0-9_.:/@-]{1,160}", str(model_hint)):
+            raise ValueError("model_hint contains unsafe characters")
+        args += ["--model", str(model_hint)]
+    import shlex
+    quoted = " ".join(shlex.quote(value) for value in args)
+    env = f"HERDR_HANDOFF_ID={shlex.quote(handoff_id)} HERDR_HANDOFF_FILE={shlex.quote(handoff_file)}"
+    return {
+        "split": ["herdr", "pane", "split", parent_pane, "--direction", "right", "--no-focus"]
+                + (["--cwd", cwd] if cwd else []),
+        "run_binary": binary,
+        "run_command": f"env {env} {quoted}",
+        "prompt": None,
+        "metadata": {"handoff_id": handoff_id, "target_harness": target_harness},
+    }
 
 
 class HandoffStore:

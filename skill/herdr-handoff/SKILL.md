@@ -6,7 +6,9 @@ description: Create, package, transfer, and resume private Herdr work across Pi,
 # HerdR Handoff Skill
 
 Use `herdr-handoff` when work needs to move between harnesses, hosts, or
-sessions. A handoff is a durable request, not an automatic process launch.
+sessions. A handoff is a durable request. `/herdr::to*` additionally launches
+the target harness interactively in a new pane split from the current Herdr
+pane.
 
 ## Safety contract
 
@@ -20,6 +22,8 @@ sessions. A handoff is a durable request, not an automatic process launch.
 - An optional model is a target hint. The recipient records the resolved model;
   do not claim a model was used before it reports that fact.
 - Use the local outbox when Herdr is unavailable and synchronize later.
+- The current pane is identified by `HERDR_PANE_ID`; never create a new
+  workspace for a `/herdr::to*` handoff.
 
 ## Workflow
 
@@ -33,7 +37,18 @@ sessions. A handoff is a durable request, not an automatic process launch.
 6. Complete, reject, cancel, or retry the handoff so the dashboard lineage is
    accurate.
 
+## Interactive transfer
+
+`/herdr::toClaude`, `/herdr::toPi`, `/herdr::toCodex`, and
+`/herdr::toOpenCode` run `herdr-handoff launch` after creating the queued
+package. The launcher splits the current pane to the right, starts the target
+harness interactively, sends the bounded resume prompt, and reports handoff
+and pane metadata for dashboard visibility.
+
+If `HERDR_PANE_ID` is unavailable, fail with an actionable error rather than
+starting a detached process or an unrelated workspace.
+
 When the user asks to hand work to Claude, Pi, Codex, or OpenCode, choose the
 matching `--target-harness` value. Use `--model` only when a model/profile hint
-was explicitly requested. Launching another CLI is opt-in and must never be
-assumed from creating a handoff.
+was explicitly requested. Generic handoff creation remains queue-only;
+`/herdr::to*` is the explicit interactive launch action.

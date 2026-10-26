@@ -28,8 +28,9 @@ registry and must not register top-level aliases such as `/artifact` or
 
 Routing rules:
 
-- `toClaude`, `toPi`, `toCodex`, and `toOpenCode` create durable handoffs with
-  the selected target harness. A trailing model is a hint only.
+- `toClaude`, `toPi`, `toCodex`, and `toOpenCode` create durable handoffs and
+  launch the selected target harness in a new pane split from the current
+  Herdr pane. A trailing model is a hint only.
 - `artifact` delegates to the installed `herdr-artifact` skill and defaults to
   the current authorized session context.
 - `handoff` delegates to `herdr-handoff`.
