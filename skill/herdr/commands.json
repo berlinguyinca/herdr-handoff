@@ -1,0 +1,18 @@
+{
+  "namespace": "herdr",
+  "syntax": "/herdr::<command>",
+  "commands": {
+    "toClaude": {"action": "handoff", "target_harness": "claude"},
+    "toPi": {"action": "handoff", "target_harness": "pi"},
+    "toCodex": {"action": "handoff", "target_harness": "codex"},
+    "toOpenCode": {"action": "handoff", "target_harness": "opencode"},
+    "artifact": {"action": "artifact"},
+    "handoff": {"action": "handoff"},
+    "review": {"action": "review"},
+    "verify": {"action": "verify"},
+    "fabric": {"action": "fabric"},
+    "publish": {"action": "publish"},
+    "observe": {"action": "observe"},
+    "session": {"action": "session"}
+  }
+}

@@ -2,6 +2,22 @@
 
 Portable private-by-default handoffs between Claude, Pi, Codex, and OpenCode.
 
+The installed command namespace is `/herdr::...`:
+
+```text
+/herdr::toClaude
+/herdr::toPi
+/herdr::toCodex
+/herdr::toOpenCode
+/herdr::artifact
+/herdr::handoff
+/herdr::review
+/herdr::verify
+```
+
+No top-level slash aliases are installed, so existing harness commands are not
+overwritten.
+
 The package works offline using a filesystem outbox and can be synchronized to
 the Herdr Engineering control plane when available. Install the skill for all
 four harnesses with:
