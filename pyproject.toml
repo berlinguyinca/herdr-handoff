@@ -7,10 +7,13 @@ name = "herdr-handoff"
 version = "0.1.0"
 description = "Portable handoff packages for Herdr harnesses"
 requires-python = ">=3.12"
-py-modules = ["herdr_handoff", "herdr_handoff_cli"]
 
 [project.scripts]
 herdr-handoff = "herdr_handoff_cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["herdr_handoff", "herdr_handoff_cli"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -8,11 +8,12 @@ import json
 import os
 import sys
 
-from herdr_handoff import HandoffStore, build_handoff
+from herdr_handoff import HandoffStore, __version__, build_handoff
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="herdr-handoff")
+    parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--root", default=os.environ.get("HERDR_HANDOFF_DIR", ".herdr/handoffs"))
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create")
