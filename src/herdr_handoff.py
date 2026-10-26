@@ -117,7 +117,7 @@ def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, 
     quoted = " ".join(shlex.quote(value) for value in args)
     env = f"HERDR_HANDOFF_ID={shlex.quote(handoff_id)} HERDR_HANDOFF_FILE={shlex.quote(handoff_file)}"
     return {
-        "split": ["herdr", "pane", "split", parent_pane, "--direction", "right", "--no-focus"]
+        "split": ["herdr", "pane", "split", parent_pane, "--direction", "right", "--focus"]
                 + (["--cwd", cwd] if cwd else []),
         "run_binary": binary,
         "run_command": f"env {env} {quoted}",
