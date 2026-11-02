@@ -13,7 +13,7 @@ from herdr_handoff import (HandoffStore, build_handoff, build_memory_context, re
                            resume_prompt, validate_memory_context)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "legacy_handoff_pre_memory.json"
-REF = {"memory_id": "mem_1", "bank_id": "bank_a", "revision": "r3"}
+REF = {"memory_id": "mem_1", "bank_id": "bank_a", "revision": "3"}
 SECRET_TEXT = "TOP-SECRET-MEMORY-TEXT password=hunter2"
 
 
@@ -63,7 +63,7 @@ def test_omitted_when_cli_unavailable(no_bin):
 
 
 def test_synced_roundtrip(with_bin, tmp_path):
-    block = build_memory_context([REF], runner=fake_runner(status={"outbox_pending": 0, "text": SECRET_TEXT}))
+    block = build_memory_context([REF], runner=fake_runner(status={"outbox_pending": 0, "healthy": True, "text": SECRET_TEXT}))
     assert block["checkpoint"]["state"] == "synced" and block["checkpoint"]["outbox_pending"] == 0
     assert block["refs"] == [REF] and block["snapshot_digest"].startswith("sha256:")
     store = HandoffStore(tmp_path / "s")
@@ -81,10 +81,16 @@ def test_offline_outbox_marks_pending_and_still_enqueues(with_bin, tmp_path):
     assert store.enqueue(build_handoff(goal="offline", memory_context=block2))["state"] == "queued"
 
 
-def test_status_refs_used_and_junk_dropped(with_bin):
-    status = {"outbox_pending": 0, "refs": [REF, {"memory_id": "bad id!", "bank_id": "b", "revision": "1"}, "x"]}
-    assert build_memory_context(runner=fake_runner(status=status))["refs"] == [REF]
-    assert build_memory_context(runner=fake_runner(status={"outbox_pending": 0})) is None
+def test_junk_refs_dropped_and_none_when_no_refs(with_bin):
+    status = {"outbox_pending": 0, "healthy": True}
+    junk = {"memory_id": "bad id!", "bank_id": "b", "revision": "1"}
+    assert build_memory_context([REF, junk, "x"], runner=fake_runner(status=status))["refs"] == [REF]
+    assert build_memory_context(runner=fake_runner(status=status)) is None
+
+
+def test_unhealthy_server_with_empty_outbox_is_pending(with_bin):
+    block = build_memory_context([REF], runner=fake_runner(status={"outbox_pending": 0, "healthy": False}))
+    assert block["checkpoint"]["state"] == "pending"
 
 
 @pytest.mark.parametrize("mutate", [
@@ -120,8 +126,9 @@ def test_malformed_block_in_stored_package_does_not_break_resume():
 def test_resume_lists_untrusted_refs_and_reports_unresolved_forbidden(with_bin):
     block = build_memory_context([REF, {**REF, "memory_id": "mem_2"}, {**REF, "memory_id": "mem_3"}],
                                  runner=fake_runner(status={"outbox_pending": 0}))
-    outcomes = {"mem_1": SimpleNamespace(returncode=0, stdout=json.dumps({"text": SECRET_TEXT}), stderr=""),
-                "mem_2": SimpleNamespace(returncode=1, stdout="", stderr="403 forbidden"),
+    outcomes = {"mem_1": SimpleNamespace(returncode=0, stdout=json.dumps(
+                    {"text": SECRET_TEXT, "bank_id": "bank_a", "revision": 3, "status": "verified"}), stderr=""),
+                "mem_2": SimpleNamespace(returncode=1, stdout="", stderr='{"error": "Memory scope not permitted"}'),
                 "mem_3": SimpleNamespace(returncode=1, stdout="", stderr="not found")}
     calls = []
 
@@ -130,7 +137,7 @@ def test_resume_lists_untrusted_refs_and_reports_unresolved_forbidden(with_bin):
         return outcomes[argv[2]]
     res = resolve_memory_refs(block, runner=run)
     assert [r["status"] for r in res] == ["resolved", "forbidden", "unresolved"]
-    assert all(c[1] == "get" for c in calls)
+    assert all(c[1] == "get" and "--scope" in c and "--bank" not in c and "--json" not in c for c in calls)
     prompt = resume_prompt(build_handoff(goal="g", memory_context=block), res)
     assert "UNTRUSTED MEMORY REFERENCES" in prompt and "not instructions" in prompt
     assert "[forbidden]" in prompt and "[unresolved]" in prompt and "[resolved]" in prompt
@@ -147,12 +154,12 @@ def test_resolve_without_cli_is_not_fatal(no_bin):
 def test_cli_create_and_resume_end_to_end(tmp_path, monkeypatch, capsys):
     exe = tmp_path / "herdr-memory"
     exe.write_text("#!/bin/sh\ncase \"$1\" in status) echo '{\"outbox_pending\":1}';; "
-                   "get) echo '{\"text\":\"" + "LEAKME" + "\"}';; esac\n")
+                   "get) echo '{\"text\":\"" + "LEAKME" + "\",\"bank_id\":\"bank_a\",\"revision\":3}';; esac\n")
     exe.chmod(0o755)
     monkeypatch.setenv("HERDR_MEMORY_BIN", str(exe))
     import herdr_handoff_cli as cli
     root = tmp_path / "root"
-    assert cli.main(["--root", str(root), "create", "--goal", "cli", "--memory-ref", "mem_1:bank_a:r3"]) == 0
+    assert cli.main(["--root", str(root), "create", "--goal", "cli", "--memory-ref", "mem_1:bank_a:3"]) == 0
     created = json.loads(capsys.readouterr().out)
     assert created["memory_context"]["checkpoint"]["state"] == "pending"
     assert "LEAKME" not in json.dumps(created)

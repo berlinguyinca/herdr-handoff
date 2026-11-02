@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import urllib.request
@@ -117,8 +118,11 @@ def validate_memory_context(block):
     for ref in refs:
         if not isinstance(ref, dict) or set(ref) != _REF_KEYS:
             raise ValueError("memory_context ref must have exactly memory_id, bank_id, revision")
-        if not all(isinstance(ref[k], str) and _MEM_ID.fullmatch(ref[k]) for k in _REF_KEYS):
-            raise ValueError("memory_context ref values must be safe identifier strings")
+        if not all(isinstance(ref[k], str) and _MEM_ID.fullmatch(ref[k]) for k in ("memory_id", "bank_id")):
+            raise ValueError("memory_context ref ids must be safe identifier strings")
+        rev = ref["revision"]
+        if not ((isinstance(rev, str) and _MEM_ID.fullmatch(rev)) or (_is_int(rev) and rev >= 0)):
+            raise ValueError("memory_context ref revision must be a safe string or non-negative integer")
         clean.append({k: ref[k] for k in ("memory_id", "bank_id", "revision")})
     digest = block.get("snapshot_digest")
     if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
@@ -141,16 +145,32 @@ def validate_memory_context(block):
 
 
 def _memory_bin(binary=None):
+    """Resolve the herdr-memory command as an argv prefix, or None when unavailable.
+
+    ``HERDR_MEMORY_BIN`` may be an executable path or a command line such as
+    ``python3 -m herdr_memory.cli``. Config, project and harness come from the CLI's own
+    ``HERDR_MEMORY_CONFIG`` / ``HERDR_HARNESS`` environment (inherited), never from the package.
+    """
     explicit = binary or os.environ.get("HERDR_MEMORY_BIN")
     if explicit:
-        return shutil.which(explicit) or (explicit if os.path.isfile(explicit) and os.access(explicit, os.X_OK) else None)
-    return shutil.which("herdr-memory")
+        argv = shlex.split(explicit) if isinstance(explicit, str) else list(explicit)
+        if not argv:
+            return None
+        found = shutil.which(argv[0])
+        return [found, *argv[1:]] if found else None
+    found = shutil.which("herdr-memory")
+    return [found] if found else None
+
+
+def _project_args():
+    project = os.environ.get("HERDR_MEMORY_PROJECT")
+    return ["--project", project] if project else []
 
 
 def _memory_json(binary, args, runner):
     """Run ``herdr-memory`` and return parsed JSON object, or None on any failure (never raises)."""
     try:
-        done = (runner or subprocess.run)([binary, *args], capture_output=True, text=True,
+        done = (runner or subprocess.run)([*binary, *_project_args(), *args], capture_output=True, text=True,
                                           timeout=_MEMORY_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
         if done.returncode != 0:
             return None
@@ -164,15 +184,13 @@ def build_memory_context(refs=None, *, binary=None, runner=None):
     """Build the optional ``memory_context`` block, or None when herdr-memory is absent/unconfigured.
 
     ``refs`` are ``{memory_id, bank_id, revision}`` dicts naming memories (ids only). Status supplies the
-    checkpoint and, optionally, ``refs``/``snapshot_digest``; any other status field (notably text) is ignored.
+    checkpoint (``healthy``, ``outbox_pending``); the digest is computed over the refs. Other fields are ignored.
     """
     exe = _memory_bin(binary)
     if not exe:
         return None
-    status = _memory_json(exe, ["status", "--json"], runner)
+    status = _memory_json(exe, ["status"], runner)
     candidates = list(refs or [])
-    if not candidates and status and isinstance(status.get("refs"), list):
-        candidates = status["refs"]
     clean = []
     for ref in candidates[:MEMORY_REFS_MAX]:
         if isinstance(ref, dict):
@@ -182,19 +200,29 @@ def build_memory_context(refs=None, *, binary=None, runner=None):
     if not clean:
         return None  # configured but nothing to reference: omit the field
     pending = 0
-    state = "pending"
+    state = "pending"  # unreachable status, unhealthy server or queued writes all mean not yet synced
     if status:
         raw = status.get("outbox_pending", status.get("pending"))
         if _is_int(raw) and raw >= 0:
             pending = raw
-            state = "synced" if raw == 0 and status.get("state", "synced") != "pending" else "pending"
-    digest = status.get("snapshot_digest") if status else None
-    if not (isinstance(digest, str) and _DIGEST.fullmatch(digest)):
-        canon = json.dumps(sorted(clean, key=lambda r: (r["bank_id"], r["memory_id"], r["revision"])),
-                           sort_keys=True, separators=(",", ":"))
-        digest = "sha256:" + hashlib.sha256(canon.encode()).hexdigest()
+            state = "synced" if raw == 0 and status.get("healthy") is True else "pending"
+    canon = json.dumps(sorted(clean, key=lambda r: (r["bank_id"], r["memory_id"], r["revision"])),
+                       sort_keys=True, separators=(",", ":"))
+    digest = "sha256:" + hashlib.sha256(canon.encode()).hexdigest()
     return validate_memory_context({"version": 1, "refs": clean, "snapshot_digest": digest,
                                     "checkpoint": {"state": state, "outbox_pending": pending, "at": _now()}})
+
+
+def _scope_for_bank(bank_id):
+    """Map a ref's bank id to the CLI ``--scope``/``--kind`` that addresses it (contract-v1 bank naming)."""
+    if bank_id == "herdr-global":
+        return "global", "fact"
+    if bank_id == "herdr-infra":
+        return "infra", "fact"
+    mission = re.search(r"-mission-([a-z0-9][a-z0-9_-]{0,63})$", bank_id)
+    if mission:
+        return "mission:" + mission.group(1), "fact"
+    return "project", "summary" if bank_id.endswith("-summaries") else "fact"
 
 
 def resolve_memory_refs(block, *, binary=None, runner=None):
@@ -213,15 +241,21 @@ def resolve_memory_refs(block, *, binary=None, runner=None):
             out.append({"ref": ref, "status": "unresolved"})
             continue
         try:
+            scope, kind = _scope_for_bank(ref["bank_id"])
             done = (runner or subprocess.run)(
-                [exe, "get", ref["memory_id"], "--bank", ref["bank_id"], "--revision", ref["revision"], "--json"],
+                [*exe, *_project_args(), "get", ref["memory_id"], "--scope", scope, "--kind", kind],
                 capture_output=True, text=True, timeout=_MEMORY_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
             if done.returncode == 0:
-                json.loads(done.stdout)
-                status = "resolved"
+                record = json.loads(done.stdout)  # memory text in it is deliberately dropped
+                if not isinstance(record, dict) or record.get("bank_id") != ref["bank_id"]:
+                    status = "unresolved"
+                elif str(record.get("revision")) != str(ref["revision"]) or record.get("status") in {"superseded", "retracted"}:
+                    status = "stale"
+                else:
+                    status = "resolved"
             else:
                 text = (done.stderr or "") + (done.stdout or "")
-                status = "forbidden" if re.search(r"(?i)forbidden|denied|403|unauthori[sz]ed", text) else "unresolved"
+                status = "forbidden" if re.search(r"(?i)not permitted|forbidden|denied|403|unauthori[sz]ed", text) else "unresolved"
         except (OSError, ValueError, subprocess.SubprocessError):
             status = "unresolved"
         out.append({"ref": ref, "status": status})

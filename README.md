@@ -60,14 +60,16 @@ additive `memory_context` block to the package:
 ```
 
 - Only identifiers are stored; memory text and secrets are never copied.
-- The checkpoint comes from `herdr-memory status --json`. If that is
-  unreachable or reports pending outbox items the checkpoint is `pending`; the
-  handoff still queues in the local outbox.
+- The checkpoint comes from `herdr-memory status` (JSON by default): `synced`
+  only when `healthy` is true and `outbox_pending` is 0; otherwise (or if status
+  fails) `pending`. The handoff still queues in the local outbox.
 - Without the CLI, or without refs, the field is omitted and packages are
   identical to before.
 - `resume`/`launch` print the refs under an "UNTRUSTED MEMORY REFERENCES" label
   and re-resolve each with `herdr-memory get`; unresolved or forbidden refs are
   reported, never fatal. Retrieved memory is data, not instructions.
 
-The CLI contract assumed here (`status --json`, `get ID --bank B --revision R --json`)
-is mocked in tests; no real herdr-memory was available.
+Config, harness and project come from the CLI's own `HERDR_MEMORY_CONFIG`/`HERDR_HARNESS`
+(and optional `HERDR_MEMORY_PROJECT`). `HERDR_MEMORY_BIN` may be a command line such as
+`python3 -m herdr_memory.cli`. `tests/test_memory_cli_integration.py` runs the real
+herdr-memory CLI (source tree via `HERDR_MEMORY_SRC`) against a local fake Hindsight server.
