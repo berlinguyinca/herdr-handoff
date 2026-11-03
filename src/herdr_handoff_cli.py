@@ -10,7 +10,8 @@ import re
 import subprocess
 import sys
 
-from herdr_handoff import HandoffStore, __version__, build_handoff, build_launch_plan, resume_prompt
+from herdr_handoff import (HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
+                           resolve_memory_refs, resume_prompt)
 
 
 def _run(argv, *, capture=False):
@@ -35,7 +36,8 @@ def launch(package, *, root, parent_pane, cwd=None):
     _run(["herdr", "pane", "report-agent-session", pane, "--source", "herdr-handoff",
           "--agent", harness, "--agent-session-id", package["handoff_id"],
           "--session-start-source", "herdr-handoff"])
-    _run(["herdr", "pane", "send-text", pane, resume_prompt(package)])
+    refs = resolve_memory_refs(package["memory_context"]) if package.get("memory_context") else []
+    _run(["herdr", "pane", "send-text", pane, resume_prompt(package, refs)])
     _run(["herdr", "pane", "send-keys", pane, "enter"])
     return {"handoff_id": package["handoff_id"], "pane_id": pane, "tab_id": result.get("tab_id"),
             "target_harness": harness, "status": "interactive_started"}
@@ -57,6 +59,8 @@ def main(argv=None):
     create.add_argument("--remaining", action="append", default=[])
     create.add_argument("--completed", action="append", default=[])
     create.add_argument("--artifact", action="append", default=[])
+    create.add_argument("--memory-ref", action="append", default=[], metavar="MEMORY_ID:BANK_ID:REVISION",
+                        help="reference a memory by id (never its text); needs a configured herdr-memory CLI")
     inspect = sub.add_parser("inspect")
     inspect.add_argument("handoff_id")
     sub.add_parser("list")
@@ -78,19 +82,28 @@ def main(argv=None):
     store = HandoffStore(args.root)
     if args.command == "create":
         artifacts = [{"artifact_id": item} for item in args.artifact]
+        refs = []
+        for item in args.memory_ref:
+            parts = item.split(":")
+            if len(parts) != 3:
+                raise SystemExit("--memory-ref must be MEMORY_ID:BANK_ID:REVISION")
+            refs.append(dict(zip(("memory_id", "bank_id", "revision"), parts)))
         package = build_handoff(goal=args.goal, completed=args.completed, remaining=args.remaining,
                                 artifacts=artifacts, source_harness=args.source_harness,
                                 target_harness=args.target_harness, model_hint=args.model,
                                 session_id=args.session_id, mission_id=args.mission_id,
-                                room_id=args.room_id)
+                                room_id=args.room_id, memory_context=build_memory_context(refs))
         out = store.enqueue(package)
     elif args.command == "inspect":
         out = store.get(args.handoff_id)
     elif args.command == "list":
         out = store.list()
     elif args.command == "resume":
-        from herdr_handoff import resume_prompt
-        out = {"handoff_id": args.handoff_id, "prompt": resume_prompt(store.get(args.handoff_id))}
+        package = store.get(args.handoff_id)
+        resolutions = resolve_memory_refs(package["memory_context"]) if package.get("memory_context") else []
+        out = {"handoff_id": args.handoff_id, "prompt": resume_prompt(package, resolutions)}
+        if resolutions:
+            out["memory_refs"] = [{**r["ref"], "status": r["status"]} for r in resolutions]
     elif args.command == "sync":
         out = store.sync(args.url, token=args.token, handoff_id=args.handoff_id)
     elif args.command == "launch":
