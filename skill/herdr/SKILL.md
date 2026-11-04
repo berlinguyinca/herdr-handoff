@@ -1,11 +1,12 @@
 ---
 name: herdr
-description: "Route concise /herdr:: commands for artifacts, handoffs, reviews, verification, fabric, publication, observation, and session context across Herdr harnesses."
+description: "Route concise /herdr:: commands for artifacts, handoffs, reviews, verification, fabric, publication, observation, session context, and engineering memory across Herdr harnesses."
 ---
 
 # HerdR command namespace
 
-Use the namespaced commands below as the stable user-facing interface:
+Use these namespaced commands where the harness supports native slash registration;
+otherwise use the installed skill or CLI fallback below:
 
 ```text
 /herdr::toClaude [model]
@@ -20,11 +21,16 @@ Use the namespaced commands below as the stable user-facing interface:
 /herdr::publish
 /herdr::observe
 /herdr::session
+/herdr::memory
+/herdr::remember
+/herdr::recall
+/herdr::forget
 ```
 
 The command registry is in `commands.json`. Harness adapters must load that
-registry and must not register top-level aliases such as `/artifact` or
-`/review`. The namespace is intentionally collision-free.
+registry only where native slash registration is supported and must not register
+top-level aliases such as `/artifact` or `/review`. Existing registrations take
+precedence even within this namespace.
 
 Routing rules:
 
@@ -36,7 +42,41 @@ Routing rules:
 - `handoff` delegates to `herdr-handoff`.
 - `review`, `verify`, `fabric`, `publish`, `observe`, and `session` delegate to
   the corresponding Herdr control-plane operation when available.
+- `memory`, `remember`, `recall`, and `forget` delegate to the installed
+  `herdr-memory` skill: memory inspection, explicit save, search, and deletion,
+  respectively. Load that skill before executing the operation and forward the
+  user's intent and arguments. It owns scope resolution, authorization, storage,
+  revision handling, and execution; do not duplicate its runtime here.
+- Follow the canonical herdr-memory SDK 0.1.6 engineering scope contract:
+  `project`, `global`, `infra`, and `mission:<id>`. Resolve authorized engineering
+  scopes through `herdr-memory`; do not broaden requests to all scopes by default.
+  The engineering namespace cannot access the personal hub. Never read or write
+  personal memory here, or recommend `--project personal` as a workaround.
+  `remember` is an explicit save request; `forget` must identify the memory and
+  its authorized engineering scope before deletion.
+- Use the existing backend/MCP and live controller through `herdr-memory`.
+  This registry adds routing only, not a memory runtime or installer.
 - Public publication always requires explicit approval.
 - Never overwrite a pre-existing harness command or skill. If an adapter
   cannot register the namespace, retain the portable CLI/API path and report
   the collision.
+
+## Unsupported slash commands and unavailable skills
+
+The registry describes routing intent; it does not prove a harness has installed
+slash-command dispatch. Register native commands only where the harness actually
+supports them. If `/herdr::...` is unsupported, report that limitation and invoke
+its installed `herdr-memory` skill using the harness's supported skill mechanism.
+Follow that skill's available MCP tools or documented `herdr-memory` CLI for the
+same operation and authorized engineering scope. `memory` means inspection/status;
+it does not imply a CLI subcommand named `memory`.
+Do not claim slash registration or execution without evidence, invent CLI/API
+commands, or substitute a different memory store. If the skill cannot be loaded,
+use the installed CLI only when its supported contract is available; otherwise
+report memory routing unavailable. Do not install anything as a routing side effect.
+
+Preserve pre-existing commands and skills, including top-level `/memory`,
+`/remember`, `/recall`, and `/forget` and any colliding `/herdr::...` registration.
+Report the collision and use a supported direct skill invocation when available;
+never overwrite, shadow, or silently replace the existing handler. This registry
+does not install aliases or memory runtime implementations.

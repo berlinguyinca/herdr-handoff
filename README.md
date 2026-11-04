@@ -13,10 +13,20 @@ The installed command namespace is `/herdr::...`:
 /herdr::handoff
 /herdr::review
 /herdr::verify
+/herdr::memory
+/herdr::remember
+/herdr::recall
+/herdr::forget
 ```
 
 No top-level slash aliases are installed, so existing harness commands are not
-overwritten.
+overwritten. The memory commands delegate to an installed `herdr-memory` skill;
+this repository does not implement or install a memory runtime. Engineering
+memory supports authorized `project`, `global`, `infra`, and `mission:<id>`
+scopes. Personal-assistant memory is outside this namespace.
+If slash dispatch is unsupported or collides with an existing command, report
+that limitation and use the harness's supported direct skill invocation instead.
+If `herdr-memory` is missing, report it unavailable without installing it.
 
 `/herdr::to*` splits the current Herdr pane, starts the selected harness
 interactively in the child pane, sends the bounded resume prompt, and reports
