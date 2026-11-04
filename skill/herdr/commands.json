@@ -13,6 +13,10 @@
     "fabric": {"action": "fabric"},
     "publish": {"action": "publish"},
     "observe": {"action": "observe"},
-    "session": {"action": "session"}
+    "session": {"action": "session"},
+    "memory": {"action": "memory", "skill": "herdr-memory"},
+    "remember": {"action": "remember", "skill": "herdr-memory"},
+    "recall": {"action": "recall", "skill": "herdr-memory"},
+    "forget": {"action": "forget", "skill": "herdr-memory"}
   }
 }

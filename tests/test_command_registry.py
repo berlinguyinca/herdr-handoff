@@ -9,5 +9,35 @@ def test_herdr_namespace_registry_contains_only_namespaced_commands():
     assert set(registry["commands"]) == {
         "toClaude", "toPi", "toCodex", "toOpenCode", "artifact", "handoff",
         "review", "verify", "fabric", "publish", "observe", "session",
+        "memory", "remember", "recall", "forget",
     }
     assert all(not name.startswith("/") for name in registry["commands"])
+
+
+def test_memory_commands_delegate_to_the_installed_skill():
+    path = Path(__file__).parents[1] / "skill" / "herdr" / "commands.json"
+    registry = json.loads(path.read_text())
+    for command in ("memory", "remember", "recall", "forget"):
+        assert registry["commands"][command] == {
+            "action": command,
+            "skill": "herdr-memory",
+        }
+
+
+def test_existing_routes_and_handoff_aliases_are_preserved():
+    path = Path(__file__).parents[1] / "skill" / "herdr" / "commands.json"
+    registry = json.loads(path.read_text())
+    assert registry["namespace"] == "herdr"
+    commands = registry["commands"]
+    for alias, harness in {
+        "toClaude": "claude", "toPi": "pi", "toCodex": "codex",
+        "toOpenCode": "opencode",
+    }.items():
+        assert commands[alias] == {
+            "action": "handoff", "target_harness": harness,
+        }
+    for command in (
+        "artifact", "handoff", "review", "verify", "fabric", "publish",
+        "observe", "session",
+    ):
+        assert commands[command] == {"action": command}
