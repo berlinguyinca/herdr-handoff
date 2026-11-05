@@ -20,10 +20,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 _SECRET = re.compile(
     r"(?i)(bearer\s+|token\s*[=:]\s*|password\s*[=:]\s*|secret\s*[=:]\s*|api[_-]?key\s*[=:]\s*)[^\s,;]+"
+)
+# Credential shapes that carry no "token=" label: GitHub, OpenAI-style, AWS access key ids, PEM private keys.
+_SECRET_SHAPES = re.compile(
+    r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
 )
 _STATES = {
     "draft": {"queued", "cancelled"},
@@ -46,7 +51,7 @@ def _now() -> str:
 
 def _clean(value):
     if isinstance(value, str):
-        return _SECRET.sub(r"\1[REDACTED]", value)[:12000]
+        return _SECRET_SHAPES.sub("[REDACTED]", _SECRET.sub(r"\1[REDACTED]", value))[:12000]
     if isinstance(value, list):
         return [_clean(item) for item in value[:200]]
     if isinstance(value, dict):
@@ -54,41 +59,165 @@ def _clean(value):
     return value
 
 
+_HARNESSES = {"pi", "claude", "codex", "opencode"}
+_LIST_KEYS = ("completed", "remaining", "decisions", "risks", "validation",
+              "constraints", "next_commands", "files", "unverified")
+_V2_LISTS = ("constraints", "next_commands", "files", "unverified")
+_WORKSPACE_KEYS = ("repo", "branch", "worktree", "cwd", "base_commit")
+_PR_URL = re.compile(r"https://[^\s/]+/\S+")
+
+
+def _text_list(name, value):
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a list of strings")
+    return [item for item in value if item.strip()]
+
+
+def _clean_workspace(workspace):
+    if workspace is None:
+        return None
+    if not isinstance(workspace, dict) or set(workspace) - set(_WORKSPACE_KEYS):
+        raise ValueError("workspace may only contain " + ", ".join(_WORKSPACE_KEYS))
+    picked = {key: workspace[key] for key in _WORKSPACE_KEYS if workspace.get(key) is not None}
+    for key, value in picked.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"workspace.{key} must be a non-empty string")
+    for key in ("worktree", "cwd"):
+        if key in picked and not picked[key].startswith("/"):
+            raise ValueError(f"workspace.{key} must be an absolute path")
+    return picked or None
+
+
+def _clean_report(report):
+    if report is None:
+        return None
+    if not isinstance(report, dict) or set(report) - {"path", "dashboard"}:
+        raise ValueError("report may only contain path, dashboard")
+    path = report.get("path")
+    if path is not None and (not isinstance(path, str) or not path.startswith("/")):
+        raise ValueError("report.path must be an absolute path")
+    if report.get("dashboard") is not None and not isinstance(report["dashboard"], str):
+        raise ValueError("report.dashboard must be a string")
+    return {k: v for k, v in report.items() if v is not None} or None
+
+
 def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks=None,
                   validation=None, provenance=None, artifacts=None, source_harness=None,
                   target_harness=None, model_hint=None, session_id=None, mission_id=None,
                   room_id=None, source_agent_id=None, target_agent_id=None, handoff_id=None,
-                  memory_context=None):
-    """Create a bounded, redacted handoff envelope suitable for any harness."""
+                  memory_context=None, workspace=None, pull_requests=None, files=None,
+                  next_commands=None, constraints=None, resume_point=None, unverified=None,
+                  report=None):
+    """Create a bounded, redacted handoff envelope suitable for any harness.
+
+    The original fields keep ``schema_version`` 1.  Supplying any of the self-sufficiency fields
+    (workspace, pull_requests, files, next_commands, constraints, resume_point, unverified, report)
+    makes it a version 2 envelope: strictly additive, so a v1 reader still finds every v1 field.
+    """
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError("goal is required")
-    if source_harness not in {"pi", "claude", "codex", "opencode", None}:
+    if source_harness not in _HARNESSES | {None}:
         raise ValueError("unsupported source harness")
-    if target_harness not in {"pi", "claude", "codex", "opencode", None}:
+    if target_harness not in _HARNESSES | {None}:
         raise ValueError("unsupported target harness")
+    v2 = {
+        "constraints": _text_list("constraints", constraints),
+        "next_commands": _text_list("next_commands", next_commands),
+        "files": _text_list("files", files),
+        "unverified": _text_list("unverified", unverified),
+    }
+    prs = _text_list("pull_requests", pull_requests)
+    if not all(_PR_URL.fullmatch(url) for url in prs):
+        raise ValueError("pull_requests must be https URLs")
+    if resume_point is not None and not isinstance(resume_point, str):
+        raise ValueError("resume_point must be a string")
+    workspace, report = _clean_workspace(workspace), _clean_report(report)
+    extended = bool(any(v2.values()) or prs or resume_point or workspace or report)
+    context = {
+        "goal": goal, "completed": _text_list("completed", completed),
+        "remaining": _text_list("remaining", remaining), "decisions": _text_list("decisions", decisions),
+        "risks": _text_list("risks", risks), "validation": _text_list("validation", validation),
+    }
     raw = {
         "handoff_id": handoff_id or "handoff_" + uuid4().hex,
-        "schema_version": 1,
+        "schema_version": 2 if extended else 1,
         "created_at": _now(),
         "updated_at": _now(),
         "state": "draft",
         "source": {"harness": source_harness, "agent_id": source_agent_id},
         "target": {"harness": target_harness, "agent_id": target_agent_id,
                     "model_hint": model_hint},
-        "context": {
-            "goal": goal, "completed": completed or [], "remaining": remaining or [],
-            "decisions": decisions or [], "risks": risks or [], "validation": validation or [],
-        },
+        "context": context,
         "provenance": provenance or {},
         "session_id": session_id, "mission_id": mission_id, "room_id": room_id,
         "artifacts": artifacts or [],
         "history": [],
     }
+    if extended:
+        context.update({key: v2[key] for key in _V2_LISTS})
+        context["resume_point"] = resume_point or ""
+        if workspace:
+            raw["workspace"] = workspace
+        if prs:
+            raw["links"] = {"pull_requests": prs}
+        if report:
+            raw["report"] = report
     package = _clean(raw)
     if memory_context is not None:
         # Structural ids only (validated); never passed through free-text cleaning or copied from memory.
         package["memory_context"] = validate_memory_context(memory_context)
     package["redaction"] = {"redacted": package != raw, "policy": "herdr-handoff-v1"}
+    validate_envelope(package)
+    return package
+
+
+def validate_envelope(package):
+    """Raise ValueError naming every problem found; return the package when it is a sound envelope."""
+    problems = []
+    if not isinstance(package, dict):
+        raise ValueError("envelope must be an object")
+    if not isinstance(package.get("handoff_id"), str) or not re.fullmatch(r"handoff_[a-f0-9]{32}", package["handoff_id"]):
+        problems.append("handoff_id must look like handoff_<32 hex>")
+    if package.get("schema_version") not in (1, 2):
+        problems.append("schema_version must be 1 or 2")
+    context = package.get("context")
+    if not isinstance(context, dict):
+        problems.append("context must be an object")
+        context = {}
+    if not isinstance(context.get("goal"), str) or not context["goal"].strip():
+        problems.append("goal must be a non-empty string")
+    for key in _LIST_KEYS:
+        if key in context and (not isinstance(context[key], list) or not all(isinstance(i, str) for i in context[key])):
+            problems.append(f"{key} must be a list of strings")
+    if "resume_point" in context and not isinstance(context["resume_point"], str):
+        problems.append("resume_point must be a string")
+    for side in ("source", "target"):
+        harness = (package.get(side) or {}).get("harness")
+        if harness not in _HARNESSES | {None}:
+            problems.append(f"{side}.harness is unsupported")
+    workspace = package.get("workspace")
+    if workspace is not None:
+        try:
+            _clean_workspace(workspace)
+        except ValueError as exc:
+            problems.append(str(exc))
+    links = package.get("links")
+    if links is not None:
+        urls = links.get("pull_requests") if isinstance(links, dict) else None
+        if not isinstance(urls, list) or not all(isinstance(u, str) and _PR_URL.fullmatch(u) for u in urls):
+            problems.append("links.pull_requests must be a list of https URLs")
+    report = package.get("report")
+    if report is not None:
+        try:
+            _clean_report(report)
+        except ValueError as exc:
+            problems.append(str(exc))
+    if package.get("schema_version") == 1 and any(k in package for k in ("workspace", "links", "report")):
+        problems.append("schema_version 1 envelopes cannot carry workspace, links or report")
+    if problems:
+        raise ValueError("invalid handoff envelope: " + "; ".join(problems))
     return package
 
 
@@ -286,46 +415,145 @@ def memory_reference_lines(package, resolutions=None):
     return lines
 
 
-def resume_prompt(package, resolutions=None):
-    """Return the bounded prompt given to a receiving harness."""
+def _bullets(items, empty="(none recorded)"):
+    return "\n".join(f"- {item}" for item in items) if items else f"- {empty}"
+
+
+def _section(title, items):
+    return [f"## {title}", _bullets(items), ""] if items else []
+
+
+def render_handoff_markdown(package):
+    """Render the whole envelope as one self-sufficient document for the receiving agent."""
     context = package.get("context") or {}
-    return "\n".join([
-        "Resume this private HerdR handoff.",
+    workspace = package.get("workspace") or {}
+    links = package.get("links") or {}
+    report = package.get("report") or {}
+    source = (package.get("source") or {}).get("harness") or "unknown"
+    target = (package.get("target") or {}).get("harness") or "unspecified"
+    lines = [f"# Handoff {package.get('handoff_id', '')}", "",
+             f"From **{source}** to **{target}**, created {package.get('created_at', '')}. "
+             "Everything you need to continue is in this file; anything marked unverified was not checked.", "",
+             "## Goal", context.get("goal", ""), ""]
+    if context.get("resume_point"):
+        lines += ["## Resume point", context["resume_point"], ""]
+    lines += _section("Constraints (binding)", context.get("constraints") or [])
+    lines += _section("Completed", context.get("completed") or [])
+    lines += _section("Remaining", context.get("remaining") or [])
+    lines += _section("Decisions", context.get("decisions") or [])
+    lines += _section("Risks", context.get("risks") or [])
+    lines += _section("Validation", context.get("validation") or [])
+    if workspace:
+        lines += ["## Workspace"] + [f"- {key}: {workspace[key]}" for key in _WORKSPACE_KEYS if key in workspace] + [""]
+    lines += _section("Pull requests", links.get("pull_requests") or [])
+    lines += _section("Key files", context.get("files") or [])
+    lines += _section("Next commands", [f"`{cmd}`" for cmd in context.get("next_commands") or []])
+    lines += _section("Unverified", context.get("unverified") or [])
+    if report:
+        lines += ["## Full report"] + [f"- {key}: {report[key]}" for key in ("path", "dashboard") if key in report] + [""]
+    if package.get("artifacts"):
+        lines += ["## Pinned artifacts", json.dumps(package["artifacts"], sort_keys=True), ""]
+    lines += ["Do not publish or expose private infrastructure without explicit approval.", ""]
+    return "\n".join(lines)
+
+
+def resume_prompt(package, resolutions=None, document=None):
+    """Return the bounded prompt given to a receiving harness (``document``: absolute path to read first)."""
+    context = package.get("context") or {}
+    workspace = package.get("workspace") or {}
+    head = ["Resume this private HerdR handoff."]
+    if document:
+        head.append(f"First read the full handoff in {document} (absolute path), then continue from its Resume point.")
+    body = [
         f"Goal: {context.get('goal', '')}",
-        "Completed:\n- " + "\n- ".join(context.get("completed") or ["(none recorded)"]),
-        "Remaining:\n- " + "\n- ".join(context.get("remaining") or ["(none recorded)"]),
-        "Decisions:\n- " + "\n- ".join(context.get("decisions") or ["(none recorded)"]),
+        "Completed:\n" + _bullets(context.get("completed")),
+        "Remaining:\n" + _bullets(context.get("remaining")),
+        "Decisions:\n" + _bullets(context.get("decisions")),
+    ]
+    for label, key in (("Risks", "risks"), ("Validation", "validation"), ("Constraints (binding)", "constraints"),
+                       ("Next commands", "next_commands"), ("Key files", "files"),
+                       ("Unverified", "unverified")):
+        if context.get(key):
+            body.append(f"{label}:\n" + _bullets(context[key]))
+    if context.get("resume_point"):
+        body.append(f"Resume point: {context['resume_point']}")
+    if workspace:
+        body.append("Workspace: " + ", ".join(f"{k}={workspace[k]}" for k in _WORKSPACE_KEYS if k in workspace))
+    prs = (package.get("links") or {}).get("pull_requests")
+    if prs:
+        body.append("Pull requests: " + ", ".join(prs))
+    return "\n".join([
+        *head, *body,
         f"Pinned artifacts: {json.dumps(package.get('artifacts') or [], sort_keys=True)}",
         *memory_reference_lines(package, resolutions),
         "Do not publish or expose private infrastructure without explicit approval.",
     ])
 
 
-def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, model_hint=None, cwd=None):
+# Verified against each harness's own --help (claude 2.1.318, pi 1.5.0, codex-cli 0.165.0, opencode 1.18.25).
+# prompt: how an initial prompt starts the interactive TUI; model: the flag that selects a model.
+HARNESS_CLI = {
+    "claude": {"bin": "claude", "model": "--model", "prompt": None, "model_format": None},
+    "pi": {"bin": "pi", "model": "--model", "prompt": None, "model_format": None},
+    "codex": {"bin": "codex", "model": "--model", "prompt": None, "model_format": None},
+    # opencode's positional argument is the project path, so the prompt needs --prompt; its --model
+    # only accepts provider/model.
+    "opencode": {"bin": "opencode", "model": "--model", "prompt": "--prompt", "model_format": "provider/model"},
+}
+_MODEL_HINT = re.compile(r"[A-Za-z0-9_.:/@-]{1,160}")
+
+
+def harness_argv(target_harness, *, model_hint=None, prompt=None):
+    """Return ``(argv, notes)`` starting ``target_harness`` interactively with an optional model and prompt.
+
+    Only flags the harness accepts are produced.  A model hint the harness cannot take (opencode wants
+    provider/model) is left out and reported in ``notes`` rather than passed and rejected.
+    """
+    spec = HARNESS_CLI.get(target_harness)
+    if spec is None:
+        raise ValueError("unsupported target harness")
+    argv, notes = [spec["bin"]], []
+    if model_hint:
+        if not _MODEL_HINT.fullmatch(str(model_hint)):
+            raise ValueError("model_hint contains unsafe characters")
+        if spec["model_format"] == "provider/model" and "/" not in str(model_hint):
+            notes.append(f"model hint {model_hint!r} skipped: {target_harness} needs provider/model")
+        else:
+            argv += [spec["model"], str(model_hint)]
+    if prompt:
+        argv += [spec["prompt"], prompt] if spec["prompt"] else [prompt]
+    return argv, notes
+
+
+def short_prompt(handoff_id, document):
+    """The one-line initial prompt: safe to type into a shell, points at the full document."""
+    return (f"Resume HerdR handoff {handoff_id}. First read {document} in full (absolute path), "
+            "then continue from its Resume point. Its Constraints section is binding.")
+
+
+def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, model_hint=None, cwd=None,
+                      prompt=None):
     """Build safe Herdr CLI operations for an interactive same-tab handoff."""
-    if not isinstance(parent_pane, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}", parent_pane):
-        raise ValueError("HERDR_PANE_ID is required and must be a valid pane id")
-    if target_harness not in _HARNESS_BIN:
+    if parent_pane is not None and (not isinstance(parent_pane, str)
+                                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}", parent_pane)):
+        raise ValueError("parent pane must be a valid pane id")
+    if target_harness not in HARNESS_CLI:
         raise ValueError("unsupported target harness")
     if not re.fullmatch(r"handoff_[a-f0-9]{32}", handoff_id):
         raise ValueError("invalid handoff_id")
     if not isinstance(handoff_file, str) or not handoff_file or "\n" in handoff_file:
         raise ValueError("handoff_file is required")
-    binary = _HARNESS_BIN[target_harness]
-    args = [binary]
-    if model_hint:
-        if not re.fullmatch(r"[A-Za-z0-9_.:/@-]{1,160}", str(model_hint)):
-            raise ValueError("model_hint contains unsafe characters")
-        args += ["--model", str(model_hint)]
-    import shlex
-    quoted = " ".join(shlex.quote(value) for value in args)
+    argv, notes = harness_argv(target_harness, model_hint=model_hint, prompt=prompt)
+    quoted = " ".join(shlex.quote(value) for value in argv)
     env = f"HERDR_HANDOFF_ID={shlex.quote(handoff_id)} HERDR_HANDOFF_FILE={shlex.quote(handoff_file)}"
     return {
-        "split": ["herdr", "pane", "split", parent_pane, "--direction", "right", "--focus"]
-                + (["--cwd", cwd] if cwd else []),
-        "run_binary": binary,
+        "split": (["herdr", "pane", "split", parent_pane, "--direction", "right", "--focus"]
+                  + (["--cwd", cwd] if cwd else [])) if parent_pane else None,
+        "run_binary": argv[0],
+        "argv": argv,
         "run_command": f"env {env} {quoted}",
-        "prompt": None,
+        "prompt": prompt,
+        "notes": notes,
         "metadata": {"handoff_id": handoff_id, "target_harness": target_harness},
     }
 
@@ -399,6 +627,19 @@ class HandoffStore:
             request.add_header("X-API-Key", token)
         with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
             return json.loads(response.read())
+
+    def write_document(self, package):
+        """Write the self-sufficient markdown form next to the outbox and return its absolute path."""
+        handoff_id = package.get("handoff_id", "")
+        self._path(handoff_id)  # id validation
+        folder = self.root.resolve() / "documents"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{handoff_id}.md"
+        temp = path.with_suffix(".md.tmp")
+        temp.write_text(render_handoff_markdown(package), encoding="utf-8")
+        temp.chmod(0o600)
+        temp.replace(path)
+        return path
 
     @staticmethod
     def _write(path, package):

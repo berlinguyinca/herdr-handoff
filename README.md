@@ -29,9 +29,14 @@ that limitation and use the harness's supported direct skill invocation instead.
 If `herdr-memory` is missing, report it unavailable without installing it.
 
 `/herdr::to*` splits the current Herdr pane, starts the selected harness
-interactively in the child pane, sends the bounded resume prompt, and reports
-the pane/handoff metadata for dashboard visibility. It requires
-`HERDR_PANE_ID`; it never starts a detached process.
+interactively in the child pane with a one-line prompt pointing at the full
+handoff document, and reports the pane/handoff metadata for dashboard
+visibility. Without `HERDR_PANE_ID` it opens a tab (or workspace) in `--cwd`;
+without a running herdr it prints the exact command (`manual_launch_required`).
+It never starts a detached process. `create` accepts `--decision`, `--risk`,
+`--validation`, `--constraint`, `--next-command`, `--file`, `--pr`,
+`--resume-point`, `--repo`, `--branch`, `--worktree`, `--report` and
+`--from-json`; see `schemas/handoff-v2.schema.json`.
 
 The package works offline using a filesystem outbox and can be synchronized to
 the Herdr Engineering control plane when available. Install the skill for all
