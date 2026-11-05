@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/herdr-handoff/schemas/handoff-v2.schema.json",
+  "title": "HerdR handoff envelope (schema_version 1 or 2)",
+  "description": "Version 2 is strictly additive over version 1: workspace, links, report and the extra context lists. A v1 envelope is still valid.",
+  "type": "object",
+  "required": ["handoff_id", "schema_version", "state", "source", "target", "context"],
+  "properties": {
+    "handoff_id": {"type": "string", "pattern": "^handoff_[a-f0-9]{32}$"},
+    "schema_version": {"enum": [1, 2]},
+    "state": {"enum": ["draft", "queued", "claimed", "accepted", "in_progress", "completed", "rejected", "cancelled", "expired", "failed"]},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "source": {"$ref": "#/$defs/endpoint"},
+    "target": {"$ref": "#/$defs/endpoint"},
+    "context": {
+      "type": "object",
+      "required": ["goal"],
+      "properties": {
+        "goal": {"type": "string", "minLength": 1},
+        "completed": {"$ref": "#/$defs/strings"},
+        "remaining": {"$ref": "#/$defs/strings"},
+        "decisions": {"$ref": "#/$defs/strings"},
+        "risks": {"$ref": "#/$defs/strings"},
+        "validation": {"$ref": "#/$defs/strings"},
+        "constraints": {"$ref": "#/$defs/strings"},
+        "next_commands": {"$ref": "#/$defs/strings"},
+        "files": {"$ref": "#/$defs/strings"},
+        "unverified": {"$ref": "#/$defs/strings"},
+        "resume_point": {"type": "string"}
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {"type": "string"},
+        "branch": {"type": "string"},
+        "worktree": {"type": "string", "pattern": "^/"},
+        "cwd": {"type": "string", "pattern": "^/"},
+        "base_commit": {"type": "string"}
+      }
+    },
+    "links": {
+      "type": "object",
+      "required": ["pull_requests"],
+      "properties": {"pull_requests": {"type": "array", "items": {"type": "string", "pattern": "^https://"}}}
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"path": {"type": "string", "pattern": "^/"}, "dashboard": {"type": "string"}}
+    },
+    "artifacts": {"type": "array"},
+    "memory_context": {"type": "object"},
+    "redaction": {"type": "object"},
+    "history": {"type": "array"}
+  },
+  "$defs": {
+    "strings": {"type": "array", "items": {"type": "string"}},
+    "endpoint": {
+      "type": "object",
+      "properties": {"harness": {"enum": ["pi", "claude", "codex", "opencode", null]}}
+    }
+  }
+}

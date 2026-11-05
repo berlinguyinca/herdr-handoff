@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "herdr-handoff"
-version = "0.1.0"
+version = "0.2.0"
 description = "Portable handoff packages for Herdr harnesses"
 requires-python = ">=3.12"
 
@@ -17,3 +17,5 @@ py-modules = ["herdr_handoff", "herdr_handoff_cli"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+addopts = "-m 'not integration'"
+markers = ["integration: runs a real harness CLI (slow, needs it installed); opt in with -m integration"]
