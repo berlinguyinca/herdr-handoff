@@ -11,6 +11,7 @@
     "review": {"action": "review"},
     "verify": {"action": "verify"},
     "fabric": {"action": "fabric"},
+    "join": {"action": "fabric-join", "skill": "herdr-join"},
     "publish": {"action": "publish"},
     "observe": {"action": "observe"},
     "session": {"action": "session"},
