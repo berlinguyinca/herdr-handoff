@@ -18,6 +18,7 @@ otherwise use the installed skill or CLI fallback below:
 /herdr::review
 /herdr::verify
 /herdr::fabric
+/herdr::join [--no-workspace]
 /herdr::publish
 /herdr::observe
 /herdr::session
@@ -56,6 +57,9 @@ Routing rules:
   its authorized engineering scope before deletion.
 - Use the existing backend/MCP and live controller through `herdr-memory`.
   This registry adds routing only, not a memory runtime or installer.
+- `join` (action `fabric-join`) delegates to the installed `herdr-join` skill (installed by
+  `herdr-eng summary install`), which runs `herdr-eng rooms join-fabric NAME --json`. It is
+  explicit opt-in: never run it from a session-start hook. `coordinate` and `grant_agent` stay owner-only.
 - Public publication always requires explicit approval.
 - Never overwrite a pre-existing harness command or skill. If an adapter
   cannot register the namespace, retain the portable CLI/API path and report
