@@ -65,6 +65,15 @@ makes the envelope `schema_version` 2; plain handoffs stay version 1. The
 target to the current harness; `/herdr::to*` stays the explicit-target form.
 Both use the same `create` then `launch` path.
 
+When the user wants the current session *replaced* rather than copied — "hand
+off and close this pane", "take over" — use
+`herdr-handoff takeover HANDOFF_ID` instead. It splits inside the current
+pane's own tab, and closes the source pane only after herdr reports the
+successor live; otherwise it refuses and leaves the source pane running. The
+receiving harness must run `herdr-handoff confirm HANDOFF_ID` once it has read
+the document and states the Resume point — until it does, the old pane stays
+open. Never close a source pane by hand to skip that confirmation.
+
 When the user asks to hand work to Claude, Pi, Codex, or OpenCode, choose the
 matching `--target-harness` value. Use `--model` only when a model/profile hint
 was explicitly requested. Generic handoff creation remains queue-only;

@@ -25,8 +25,22 @@ install_one() {
   source="$3"
   destination="$dir/$name"
   mkdir -p "$dir"
-  if [ -e "$destination" ] || [ -L "$destination" ]; then
-    [ -L "$destination" ] && [ "$(readlink "$destination")" = "$source" ] && return 0
+  if [ -L "$destination" ]; then
+    target=$(readlink "$destination")
+    [ "$target" = "$source" ] && return 0
+    # A link into another checkout of *this* repo is an earlier install of the same skill: the pinned
+    # revision moved to a different path, and leaving it would have every harness keep reading the old
+    # skill text forever.  "this repo" is decided by that tree's own pyproject metadata, not by its
+    # directory name, so an operator's own skill at a similar path stays untouched.
+    if [ "$(basename "$target")" = "$name" ] && [ "$(basename "$(dirname "$target")")" = "skill" ] \
+       && grep -q '^name = "herdr-handoff"$' "$(dirname "$(dirname "$target")")/pyproject.toml" 2>/dev/null
+    then
+      rm -f "$destination"
+    else
+      echo "collision: leaving existing $destination -> $target unchanged" >&2
+      return 0
+    fi
+  elif [ -e "$destination" ]; then
     echo "collision: leaving existing $destination unchanged" >&2
     return 0
   fi

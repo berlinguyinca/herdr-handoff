@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _SECRET = re.compile(
     r"(?i)(bearer\s+|token\s*[=:]\s*|password\s*[=:]\s*|secret\s*[=:]\s*|api[_-]?key\s*[=:]\s*)[^\s,;]+"
@@ -216,6 +216,10 @@ def validate_envelope(package):
             problems.append(str(exc))
     if package.get("schema_version") == 1 and any(k in package for k in ("workspace", "links", "report")):
         problems.append("schema_version 1 envelopes cannot carry workspace, links or report")
+    try:
+        validate_takeover(package.get("takeover"))
+    except ValueError as exc:
+        problems.append(str(exc))
     if problems:
         raise ValueError("invalid handoff envelope: " + "; ".join(problems))
     return package
@@ -503,16 +507,23 @@ HARNESS_CLI = {
 _MODEL_HINT = re.compile(r"[A-Za-z0-9_.:/@-]{1,160}")
 
 
-def harness_argv(target_harness, *, model_hint=None, prompt=None):
+def harness_argv(target_harness, *, model_hint=None, prompt=None, binary=None):
     """Return ``(argv, notes)`` starting ``target_harness`` interactively with an optional model and prompt.
 
     Only flags the harness accepts are produced.  A model hint the harness cannot take (opencode wants
     provider/model) is left out and reported in ``notes`` rather than passed and rejected.
+
+    ``binary`` pins the program to run by absolute path.  A pane starts a login shell, which rebuilds
+    PATH (on macOS via /usr/libexec/path_helper), so a bare name can start a different program than the
+    one the launcher resolved - measured here, where a handoff meant for a harness started another one.
     """
     spec = HARNESS_CLI.get(target_harness)
     if spec is None:
         raise ValueError("unsupported target harness")
-    argv, notes = [spec["bin"]], []
+    if binary is not None and (not isinstance(binary, str) or not binary.startswith("/") or "\n" in binary
+                               or not os.path.isfile(binary) or not os.access(binary, os.X_OK)):
+        raise ValueError("binary must be an existing absolute executable path")
+    argv, notes = [binary or spec["bin"]], []
     if model_hint:
         if not _MODEL_HINT.fullmatch(str(model_hint)):
             raise ValueError("model_hint contains unsafe characters")
@@ -532,7 +543,7 @@ def short_prompt(handoff_id, document):
 
 
 def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, model_hint=None, cwd=None,
-                      prompt=None):
+                      prompt=None, harness_binary=None, fallback_prompt=None):
     """Build safe Herdr CLI operations for an interactive same-tab handoff."""
     if parent_pane is not None and (not isinstance(parent_pane, str)
                                     or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}", parent_pane)):
@@ -543,19 +554,143 @@ def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, 
         raise ValueError("invalid handoff_id")
     if not isinstance(handoff_file, str) or not handoff_file or "\n" in handoff_file:
         raise ValueError("handoff_file is required")
-    argv, notes = harness_argv(target_harness, model_hint=model_hint, prompt=prompt)
+    argv, notes = harness_argv(target_harness, model_hint=model_hint, prompt=prompt, binary=harness_binary)
     quoted = " ".join(shlex.quote(value) for value in argv)
     env = f"HERDR_HANDOFF_ID={shlex.quote(handoff_id)} HERDR_HANDOFF_FILE={shlex.quote(handoff_file)}"
+    full_command = f"env {env} {quoted}"
+    run_command, shortening = full_command, None
+    if prompt is not None and fallback_prompt and len(full_command) > MAX_TYPED_COMMAND:
+        shorter, _ = harness_argv(target_harness, model_hint=model_hint, prompt=fallback_prompt,
+                                  binary=harness_binary)
+        run_command = f"env {env} {' '.join(shlex.quote(value) for value in shorter)}"
+        shortening = (f"the typed prompt was shortened ({len(full_command)} > {MAX_TYPED_COMMAND} bytes): herdr "
+                      "types a longer command into a pane without the shell ever running it, so the full prompt "
+                      "stays in the handoff document and in full_command")
     return {
         "split": (["herdr", "pane", "split", parent_pane, "--direction", "right", "--focus"]
                   + (["--cwd", cwd] if cwd else [])) if parent_pane else None,
         "run_binary": argv[0],
         "argv": argv,
-        "run_command": f"env {env} {quoted}",
+        "run_command": run_command,
+        "full_command": full_command,
         "prompt": prompt,
-        "notes": notes,
+        "notes": notes + ([shortening] if shortening else []),
         "metadata": {"handoff_id": handoff_id, "target_harness": target_harness},
     }
+
+
+def compact_prompt(handoff_id, *, confirm=False):
+    """The same instruction with no absolute path in it, for when the typed command would not fit.
+
+    It points at ``HERDR_HANDOFF_FILE``, which the launched command already exports, so it stays short
+    however deep the handoff root sits.
+    """
+    text = (f"Resume HerdR handoff {handoff_id}. Read the handoff document named by the HERDR_HANDOFF_FILE "
+            "environment variable in full, then continue from its Resume point. Its Constraints section is "
+            "binding.")
+    if confirm:
+        text += (f" When you have the Resume point, run `herdr-handoff confirm {handoff_id}` so the pane you "
+                 "replaced can be closed.")
+    return text
+
+
+def takeover_prompt(handoff_id, document, *, root=None):
+    """One-line prompt for a takeover: read the document, then confirm so the source pane can close.
+
+    With no ``root`` the confirm command carries no path at all, which is what the launched pane is
+    told to run: every byte of a typed command counts against what herdr can deliver, and the pane can
+    rebuild the root from the ``HERDR_HANDOFF_FILE`` it is exported (see `_handoff_root`).
+    """
+    command = (f"herdr-handoff --root {shlex.quote(str(root))} confirm {handoff_id}" if root
+               else f"herdr-handoff confirm {handoff_id}")
+    return (f"{short_prompt(handoff_id, document)} When you have the Resume point, run "
+            f"`{command}` so the pane you replaced can be closed.")
+
+
+TAKEOVER_PHASES = frozenset({"launching", "launched", "confirmed", "source_closed", "unconfirmed",
+                             "launch_failed", "already_closed"})
+"""Durable phases of a takeover, in causal order: launch, confirm, then close the source pane."""
+
+MAX_TYPED_COMMAND = 900
+"""Longest command `herdr pane run` delivers reliably.
+
+Measured against a real herdr server: a 1022-byte command typed into a pane ran, while a 1072-byte one
+was typed (visible in the pane) and never executed - the shell sat at its prompt with the text on the
+line.  A silently un-started successor is the worst thing a takeover can do, so the typed command is
+kept well inside that boundary.
+"""
+
+
+def _handoff_root(handoff_file):
+    """The handoff root implied by `<root>/outbox/<id>.json`, or None for an unusual layout.
+
+    A successor derives its root this way instead of being handed a second variable: every byte of the
+    typed command counts against `MAX_TYPED_COMMAND`, and the root is already in the file path.
+    """
+    path = os.path.normpath(handoff_file)
+    parent, leaf = os.path.dirname(path), os.path.basename(path)
+    if os.path.basename(parent) == "outbox" and leaf.endswith(".json"):
+        return os.path.dirname(parent)
+    return None
+
+_PANE_OR_TAB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}")
+_TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
+                            "source_closed_at", "reason", "evidence"})
+_TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")
+_TAKEOVER_STAMPS = ("confirmed_at", "source_closed_at")
+_PLACEMENTS = frozenset({"split", "tab", "workspace"})
+
+
+def validate_takeover(block):
+    """Return the takeover block, or raise.  A missing block is valid: takeover is additive.
+
+    The block is the only record of a destructive move (the source pane is closed), so it is what a
+    re-run reads to decide whether it may split, may close, or must do nothing at all.
+    """
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError("takeover must be an object")
+    unknown = sorted(set(block) - _TAKEOVER_KEYS)
+    if unknown:
+        raise ValueError(f"takeover has unsupported keys: {', '.join(unknown)}")
+    if block.get("version") != 1:
+        raise ValueError("takeover version must be 1")
+    if block.get("phase") not in TAKEOVER_PHASES:
+        raise ValueError(f"takeover phase must be one of {sorted(TAKEOVER_PHASES)}")
+    for key in _TAKEOVER_PANES:
+        value = block.get(key)
+        if value is not None and (not isinstance(value, str) or not _PANE_OR_TAB_ID.fullmatch(value)):
+            raise ValueError(f"takeover {key} must be a pane or tab id")
+    for key in _TAKEOVER_STAMPS:
+        value = block.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip() or "\n" in value):
+            raise ValueError(f"takeover {key} must be a timestamp")
+    if block.get("reason") is not None and not isinstance(block["reason"], str):
+        raise ValueError("takeover reason must be a string")
+    if block.get("placement") is not None and block["placement"] not in _PLACEMENTS:
+        raise ValueError(f"takeover placement must be one of {sorted(_PLACEMENTS)}")
+    if block.get("evidence") is not None and not isinstance(block["evidence"], dict):
+        raise ValueError("takeover evidence must be an object")
+    return block
+
+
+def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confirmed):
+    """Decide whether the session being replaced may be closed - the whole safety gate in one pure call.
+
+    Closing the source pane is destructive, so it is allowed only for a successor that is in the source
+    pane's own tab (the split succeeded), is a different pane, and has been observed live.  Anything else
+    refuses and says why, so the operator keeps both sessions.
+    """
+    if placement != "split" or not same_tab:
+        return {"close": False, "reason": "not_same_tab"}
+    if not source_pane:
+        return {"close": False, "reason": "no_source_pane"}
+    if not child_pane or child_pane == source_pane:
+        return {"close": False, "reason": "same_pane"}
+    if not confirmed:
+        return {"close": False, "reason": "unconfirmed"}
+    return {"close": True, "reason": ""}
 
 
 class HandoffStore:
@@ -589,6 +724,34 @@ class HandoffStore:
         package["updated_at"] = _now()
         package["history"] = [{"state": "queued", "actor": "local", "at": package["updated_at"]}]
         self._write(path, package)
+        return package
+
+    def record_takeover(self, handoff_id, changes, *, state=None, actor="local-takeover"):
+        """Persist the takeover block (merging `changes`) and, when asked, the handoff state.
+
+        Stamps are written here rather than by the caller: `confirmed_at` and `source_closed_at` are the
+        durable proof of what actually happened, and a re-run must be able to trust them after a crash.
+        A phase of `confirmed` or `source_closed` stamps its own time once and never restamps it.
+        """
+        package = self.get(handoff_id)
+        block = dict(validate_takeover(package.get("takeover")) or {})
+        block = {**block, **changes}
+        block.setdefault("version", 1)
+        phase = block.get("phase")
+        if phase in ("confirmed", "source_closed", "already_closed"):
+            block.setdefault("confirmed_at", _now())
+        if phase in ("source_closed", "already_closed"):
+            block.setdefault("source_closed_at", _now())
+        validate_takeover(block)
+        package["takeover"] = block
+        package["updated_at"] = _now()
+        if state is not None and state != package["state"]:
+            old = package["state"]
+            if state not in _STATES.get(old, set()):
+                raise ValueError(f"invalid transition: {old} -> {state}")
+            package["state"] = state
+            package.setdefault("history", []).append({"state": state, "actor": actor, "at": package["updated_at"]})
+        self._write(self._path(handoff_id), package)
         return package
 
     def transition(self, handoff_id, state, *, actor):
@@ -636,10 +799,22 @@ class HandoffStore:
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{handoff_id}.md"
         temp = path.with_suffix(".md.tmp")
-        temp.write_text(render_handoff_markdown(package), encoding="utf-8")
+        temp.write_text(render_handoff_markdown(package) + self._confirm_section(handoff_id), encoding="utf-8")
         temp.chmod(0o600)
         temp.replace(path)
         return path
+
+    def _confirm_section(self, handoff_id):
+        """How the successor releases the pane it replaced, spelled out with this root.
+
+        The typed prompt stays short (the successor derives its root from the exported
+        ``HERDR_HANDOFF_FILE``), so the full command - the one that works from any shell, in any cwd -
+        belongs here, in the document the successor has to read anyway.
+        """
+        return ("\n## Releasing the pane this handoff replaces\n\n"
+                "Once you have the Resume point from this document, run:\n\n"
+                f"```sh\nherdr-handoff --root {shlex.quote(str(self.root.resolve()))} confirm {handoff_id}\n```\n\n"
+                "Until you do, the pane this handoff came from stays open on purpose.\n")
 
     @staticmethod
     def _write(path, package):

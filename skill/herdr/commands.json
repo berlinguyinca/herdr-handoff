@@ -8,6 +8,7 @@
     "toOpenCode": {"action": "handoff", "target_harness": "opencode"},
     "artifact": {"action": "artifact"},
     "handoff": {"action": "handoff"},
+    "takeover": {"action": "takeover"},
     "review": {"action": "review"},
     "verify": {"action": "verify"},
     "fabric": {"action": "fabric"},

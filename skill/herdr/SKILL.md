@@ -41,6 +41,11 @@ Routing rules:
 - `artifact` delegates to the installed `herdr-artifact` skill and defaults to
   the current authorized session context.
 - `handoff` delegates to `herdr-handoff`.
+- `takeover` delegates to `herdr-handoff takeover`: the successor starts in a
+  split inside the current pane's own tab, and the current pane is closed only
+  after herdr reports the successor live and the successor has run
+  `herdr-handoff confirm HANDOFF_ID`. Without that proof the current pane keeps
+  running and the refusal is reported.
 - `review`, `verify`, `fabric`, `publish`, `observe`, and `session` delegate to
   the corresponding Herdr control-plane operation when available.
 - `memory`, `remember`, `recall`, and `forget` delegate to the installed

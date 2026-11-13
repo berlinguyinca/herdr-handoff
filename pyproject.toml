@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "herdr-handoff"
-version = "0.2.0"
+version = "0.3.0"
 description = "Portable handoff packages for Herdr harnesses"
 requires-python = ">=3.12"
 
