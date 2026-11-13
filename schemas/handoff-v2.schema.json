@@ -54,10 +54,28 @@
     "artifacts": {"type": "array"},
     "memory_context": {"type": "object"},
     "redaction": {"type": "object"},
+    "takeover": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "phase"],
+      "properties": {
+        "version": {"const": 1},
+        "phase": {"enum": ["launching", "launched", "confirmed", "source_closed", "unconfirmed", "launch_failed", "already_closed"]},
+        "source_pane": {"$ref": "#/$defs/pane_or_tab_id"},
+        "child_pane": {"$ref": "#/$defs/pane_or_tab_id"},
+        "tab_id": {"$ref": "#/$defs/pane_or_tab_id"},
+        "placement": {"enum": ["split", "tab", "workspace"]},
+        "confirmed_at": {"type": "string", "minLength": 1},
+        "source_closed_at": {"type": "string", "minLength": 1},
+        "reason": {"type": "string"},
+        "evidence": {"type": "object"}
+      }
+    },
     "history": {"type": "array"}
   },
   "$defs": {
     "strings": {"type": "array", "items": {"type": "string"}},
+    "pane_or_tab_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}$"},
     "endpoint": {
       "type": "object",
       "properties": {"harness": {"enum": ["pi", "claude", "codex", "opencode", null]}}

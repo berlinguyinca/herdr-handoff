@@ -57,6 +57,40 @@ herdr-handoff create --goal "Continue the current session" \
 Handoffs do not launch another harness automatically. They produce a portable
 JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
+### Takeover: replace the pane you are in
+
+```sh
+herdr-handoff takeover HANDOFF_ID [--parent-pane PANE] [--cwd DIR] \
+  [--confirm-timeout 25] [--keep-source]
+```
+
+`takeover` is `launch` for a session that is being replaced rather than copied:
+the successor starts in a split inside the *source pane's own tab*, and once
+herdr reports it live the source pane is closed, so the tab keeps working and the
+replaced session stops echoing it. The close is the one destructive step and it
+needs proof first — herdr has to report an agent in the child pane in a settled
+state and show the handoff id in its output. Without that proof, or if the
+successor landed in another tab, the source pane is left running and the refusal
+is reported with a non-zero exit (statuses `launch_unconfirmed`,
+`launch_failed`, `source_close_failed`; the recorded phase is `unconfirmed`).
+
+The successor confirms itself: `herdr-handoff confirm HANDOFF_ID`. The handoff
+document spells the command out with the absolute root, and a pane started by a
+handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works
+there. Every step is recorded in the package's `takeover` block (`launching` →
+`launched` → `confirmed` → `source_closed`, or `unconfirmed`), so a repeat
+trigger continues the recorded move instead of splitting a second pane or
+closing one twice. `--keep-source` starts the successor and never closes
+anything.
+
+A command typed into a pane has to be short enough for herdr to deliver: 1022
+bytes ran and 1072 bytes were typed without the shell ever starting (measured
+against a real server). `MAX_TYPED_COMMAND` (900) keeps the launch command
+inside that, and if the handoff root is deep enough that it would not fit, the
+typed prompt is shortened to point at `HERDR_HANDOFF_FILE` — the full prompt
+stays in the document and in the plan's `full_command`. A successor that was
+never started is the worst failure a handoff can have, so it is designed out.
+
 Use `herdr-handoff resume HANDOFF_ID` to produce the receiving harness prompt,
 or `herdr-handoff sync --url http://127.0.0.1:9482 --token "$HERDR_API_KEY"`
 to upload the local outbox when the control plane is reachable.
