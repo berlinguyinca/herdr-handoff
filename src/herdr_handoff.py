@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _SECRET = re.compile(
     r"(?i)(bearer\s+|token\s*[=:]\s*|password\s*[=:]\s*|secret\s*[=:]\s*|api[_-]?key\s*[=:]\s*)[^\s,;]+"
@@ -597,8 +597,9 @@ def compact_prompt(handoff_id, *, confirm=False):
 def takeover_prompt(handoff_id, document, *, root=None):
     """One-line prompt for a takeover: read the document, then confirm so the source pane can close.
 
-    With no ``root`` the confirm command carries no path at all: the launched pane exports
-    ``HERDR_HANDOFF_ROOT``, and every byte of a typed command counts against what herdr can deliver.
+    With no ``root`` the confirm command carries no path at all, which is what the launched pane is
+    told to run: every byte of a typed command counts against what herdr can deliver, and the pane can
+    rebuild the root from the ``HERDR_HANDOFF_FILE`` it is exported (see `_handoff_root`).
     """
     command = (f"herdr-handoff --root {shlex.quote(str(root))} confirm {handoff_id}" if root
                else f"herdr-handoff confirm {handoff_id}")
@@ -608,6 +609,7 @@ def takeover_prompt(handoff_id, document, *, root=None):
 
 TAKEOVER_PHASES = frozenset({"launching", "launched", "confirmed", "source_closed", "unconfirmed",
                              "launch_failed", "already_closed"})
+"""Durable phases of a takeover, in causal order: launch, confirm, then close the source pane."""
 
 MAX_TYPED_COMMAND = 900
 """Longest command `herdr pane run` delivers reliably.
@@ -630,7 +632,6 @@ def _handoff_root(handoff_file):
     if os.path.basename(parent) == "outbox" and leaf.endswith(".json"):
         return os.path.dirname(parent)
     return None
-"""Durable phases of a takeover, in causal order: launch, confirm, then close the source pane."""
 
 _PANE_OR_TAB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}")
 _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
@@ -806,8 +807,9 @@ class HandoffStore:
     def _confirm_section(self, handoff_id):
         """How the successor releases the pane it replaced, spelled out with this root.
 
-        The typed prompt stays short (the pane exports HERDR_HANDOFF_ROOT), so the full command - the one
-        that works from any shell - belongs here, in the document the successor has to read anyway.
+        The typed prompt stays short (the successor derives its root from the exported
+        ``HERDR_HANDOFF_FILE``), so the full command - the one that works from any shell, in any cwd -
+        belongs here, in the document the successor has to read anyway.
         """
         return ("\n## Releasing the pane this handoff replaces\n\n"
                 "Once you have the Resume point from this document, run:\n\n"

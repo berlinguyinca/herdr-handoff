@@ -17,7 +17,8 @@ import pytest
 
 from conftest import wait_for_json
 from herdr_handoff import (TAKEOVER_PHASES, HandoffStore, build_handoff, build_launch_plan,
-                           decide_takeover_close, short_prompt, takeover_prompt, validate_takeover)
+                           decide_takeover_close, short_prompt, takeover_prompt, validate_takeover,
+                           _handoff_root)
 
 ID = "handoff_" + "a" * 32
 
@@ -78,12 +79,30 @@ def test_takeover_prompt_points_at_the_document_and_stays_a_single_line():
 
 
 def test_the_takeover_prompt_drops_the_root_when_the_pane_already_has_it(tmp_path):
-    # The pane exports HERDR_HANDOFF_ROOT and every byte of a typed command counts against what herdr can
-    # deliver (herdr_handoff.MAX_TYPED_COMMAND), so the successor is handed the short form.
+    # Every byte of a typed command counts against what herdr can deliver
+    # (herdr_handoff.MAX_TYPED_COMMAND), and the successor can rebuild the root from the file it is
+    # exported, so the short form is the one it is handed.
     prompt = takeover_prompt(ID, tmp_path / "documents" / f"{ID}.md")
     assert "--root" not in prompt
     assert f"`herdr-handoff confirm {ID}`" in prompt
     assert prompt == prompt.strip() and prompt.count("\n") == 0
+
+
+def test_the_successor_rebuilds_the_root_from_the_variables_the_pane_is_exported(tmp_path):
+    # `herdr-handoff confirm <id>` carries no path, so a takeover depends entirely on the variables the
+    # launch command exports and on deriving the root back out of the file path.  A third variable would
+    # cost typed bytes; a renamed one would leave the successor unable to release the pane it replaced.
+    handoff_file = str(tmp_path / "handoffs" / "outbox" / f"{ID}.json")
+    plan = build_launch_plan("w1:p1", "pi", ID, handoff_file,
+                             prompt=takeover_prompt(ID, tmp_path / "documents" / f"{ID}.md"))
+    typed = plan["run_command"].split()
+    assert typed[0] == "env"
+    exported = dict(word.split("=", 1) for word in typed[1:3])
+    assert sorted(exported) == ["HERDR_HANDOFF_FILE", "HERDR_HANDOFF_ID"]
+    assert exported["HERDR_HANDOFF_ID"] == ID
+    assert _handoff_root(exported["HERDR_HANDOFF_FILE"]) == str(tmp_path / "handoffs")
+    # an unusual layout derives no root rather than a wrong one, and the CLI falls back to HERDR_HANDOFF_DIR
+    assert _handoff_root("/somewhere/else/package.json") is None
 
 
 def test_the_document_spells_out_the_confirm_command_with_the_real_root(tmp_path):
