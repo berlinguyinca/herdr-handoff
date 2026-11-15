@@ -114,3 +114,39 @@ def wait_for_json(path: Path, timeout: float = 20.0):
                 pass
         time.sleep(0.2)
     raise AssertionError(f"{path} was not written within {timeout}s")
+
+
+# --- real git worktrees, for the dirty-worktree gate --------------------------------------------------
+
+GIT_ENV = {
+    "PATH": os.environ.get("PATH", ""),
+    "HOME": "/nonexistent",          # never read a developer's ~/.gitconfig
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_AUTHOR_NAME": "guard", "GIT_AUTHOR_EMAIL": "guard@example.invalid",
+    "GIT_COMMITTER_NAME": "guard", "GIT_COMMITTER_EMAIL": "guard@example.invalid",
+}
+
+
+def git(repo, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args], env=GIT_ENV, capture_output=True,
+                          text=True, check=True)
+
+
+def pushed_repo(tmp_path: Path, name: str = "work") -> Path:
+    """A real worktree on a real bare remote, with one commit the remote already has.
+
+    This is the state a takeover may close a pane in: everything the session produced is durable
+    somewhere other than that pane's memory.
+    """
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(origin)], env=GIT_ENV, capture_output=True, check=True)
+    work = tmp_path / name
+    work.mkdir()
+    git(work, "init", "-q", "-b", "main")
+    git(work, "remote", "add", "origin", str(origin))
+    (work / "README.md").write_text("durable\n", encoding="utf-8")
+    git(work, "add", "README.md")
+    git(work, "commit", "-q", "-m", "initial")
+    git(work, "push", "-q", "-u", "origin", "main")
+    return work

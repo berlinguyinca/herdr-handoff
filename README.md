@@ -28,12 +28,16 @@ If slash dispatch is unsupported or collides with an existing command, report
 that limitation and use the harness's supported direct skill invocation instead.
 If `herdr-memory` is missing, report it unavailable without installing it.
 
-`/herdr::to*` splits the current Herdr pane, starts the selected harness
-interactively in the child pane with a one-line prompt pointing at the full
-handoff document, and reports the pane/handoff metadata for dashboard
-visibility. Without `HERDR_PANE_ID` it opens a tab (or workspace) in `--cwd`;
-without a running herdr it prints the exact command (`manual_launch_required`).
-It never starts a detached process. `create` accepts `--decision`, `--risk`,
+`/herdr::to*` hands over: it creates the handoff, splits the current Herdr
+pane, starts the selected harness interactively in the child pane with a
+one-line prompt pointing at the full handoff document, reports the
+pane/handoff metadata for dashboard visibility, and closes the pane it replaced
+once the successor has proved itself (it runs `takeover`, so see below). Pass
+`--keep-source` to want both sessions side by side. Without `HERDR_PANE_ID` it
+opens a tab (or workspace) in `--cwd`; without a running herdr it prints the
+exact command (`manual_launch_required`). It never starts a detached process,
+and it never closes anything without proof — a refusal leaves both panes up.
+`create` accepts `--decision`, `--risk`,
 `--validation`, `--constraint`, `--next-command`, `--file`, `--pr`,
 `--resume-point`, `--repo`, `--branch`, `--worktree`, `--report` and
 `--from-json`; see `schemas/handoff-v2.schema.json`.
@@ -61,7 +65,7 @@ JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
 ```sh
 herdr-handoff takeover HANDOFF_ID [--parent-pane PANE] [--cwd DIR] \
-  [--confirm-timeout 25] [--keep-source]
+  [--confirm-timeout 25] [--keep-source] [--source-cwd DIR] [--allow-dirty-source]
 ```
 
 `takeover` is `launch` for a session that is being replaced rather than copied:
@@ -69,10 +73,29 @@ the successor starts in a split inside the *source pane's own tab*, and once
 herdr reports it live the source pane is closed, so the tab keeps working and the
 replaced session stops echoing it. The close is the one destructive step and it
 needs proof first — herdr has to report an agent in the child pane in a settled
-state and show the handoff id in its output. Without that proof, or if the
-successor landed in another tab, the source pane is left running and the refusal
-is reported with a non-zero exit (statuses `launch_unconfirmed`,
-`launch_failed`, `source_close_failed`; the recorded phase is `unconfirmed`).
+state and show the handoff id in its output — and the source worktree has to
+hold nothing that exists only there. It refuses (exit 1, both panes left
+running) with statuses `launch_unconfirmed`, `launch_failed`,
+`source_close_failed`, `source_dirty`; the recorded phase is `unconfirmed` for
+the launch refusals, and `confirmed` with the worktree reason for
+`source_dirty`.
+
+`source_dirty` is the guard on the work rather than the successor: uncommitted
+tracked changes, or commits no remote branch has (`git status --porcelain`,
+`git rev-list --count HEAD --not --remotes`). Closing the pane kills the session
+that made them, and a pane that has been closed cannot be reopened. Untracked
+files alone never block — harness state and build output are untracked in
+nearly every checkout, and a guard that cried wolf would only train whoever uses
+it to override it. Clear it by committing or pushing and running the command
+again; `--allow-dirty-source` closes the pane anyway when the operator says the
+work may stay behind, and `--source-cwd DIR` names the worktree to check when
+the pane sits somewhere other than the work it produced. The guard never buys
+its way past the other refusals: an unconfirmed successor still cannot close a
+pane.
+
+So order a handoff this way, and nothing can be lost: make the work durable
+(commit, push, upload artifacts, file issues), create the handoff, launch the
+successor, confirm, close the source pane last.
 
 The successor confirms itself: `herdr-handoff confirm HANDOFF_ID`. The handoff
 document spells the command out with the absolute root, and a pane started by a
@@ -80,8 +103,9 @@ handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works
 there. Every step is recorded in the package's `takeover` block (`launching` →
 `launched` → `confirmed` → `source_closed`, or `unconfirmed`), so a repeat
 trigger continues the recorded move instead of splitting a second pane or
-closing one twice. `--keep-source` starts the successor and never closes
-anything.
+closing one twice. `--keep-source` starts the successor and never closes anything, which is what a
+parallel session wants; it is the only form that leaves the source pane running
+on success.
 
 A command typed into a pane has to be short enough for herdr to deliver: 1022
 bytes ran and 1072 bytes were typed without the shell ever starting (measured

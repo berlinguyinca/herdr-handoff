@@ -36,16 +36,23 @@ precedence even within this namespace.
 Routing rules:
 
 - `toClaude`, `toPi`, `toCodex`, and `toOpenCode` create durable handoffs and
-  launch the selected target harness in a new pane split from the current
-  Herdr pane. A trailing model is a hint only.
+  hand over by running `herdr-handoff takeover`: the target harness starts in a
+  split of the current Herdr pane and, once herdr reports it live and it has run
+  `herdr-handoff confirm`, the current pane is closed. A trailing model is a
+  hint only. Use `--keep-source` when the user wants both sessions running, and
+  report a refusal (`launch_unconfirmed`, `launch_failed`,
+  `source_close_failed`, `source_dirty`) instead of closing anything by hand.
 - `artifact` delegates to the installed `herdr-artifact` skill and defaults to
   the current authorized session context.
 - `handoff` delegates to `herdr-handoff`.
 - `takeover` delegates to `herdr-handoff takeover`: the successor starts in a
   split inside the current pane's own tab, and the current pane is closed only
   after herdr reports the successor live and the successor has run
-  `herdr-handoff confirm HANDOFF_ID`. Without that proof the current pane keeps
-  running and the refusal is reported.
+  `herdr-handoff confirm HANDOFF_ID`, and only while the source worktree holds
+  nothing uncommitted or unpushed (`source_dirty`). Without that proof the
+  current pane keeps running and the refusal is reported. Make work durable
+  before any handoff that closes a pane; `--allow-dirty-source` is the operator's
+  explicit override, never a retry.
 - `review`, `verify`, `fabric`, `publish`, `observe`, and `session` delegate to
   the corresponding Herdr control-plane operation when available.
 - `memory`, `remember`, `recall`, and `forget` delegate to the installed

@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 _SECRET = re.compile(
     r"(?i)(bearer\s+|token\s*[=:]\s*|password\s*[=:]\s*|secret\s*[=:]\s*|api[_-]?key\s*[=:]\s*)[^\s,;]+"
@@ -675,12 +675,113 @@ def validate_takeover(block):
     return block
 
 
-def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confirmed):
+_GUARD_GIT_TIMEOUT_SECONDS = 10
+
+
+def _git_text(cwd, *args):
+    """Ask git something, and report failure as `False` rather than as an exception."""
+    try:
+        done = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                              timeout=_GUARD_GIT_TIMEOUT_SECONDS)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, ""
+    return done.returncode == 0, (done.stdout or "").strip()
+
+
+def _count(value):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def source_worktree_state(path):
+    """What git says, at this moment, about the worktree the source pane is sitting in.
+
+    Closing a pane kills the agent inside it, and the one thing that cannot be recovered afterwards is
+    work that existed only in that session.  Git is the record of whether work is durable elsewhere:
+    tracked changes are not committed, and commits no remote branch holds exist on one machine.  Both
+    refuse the close.
+
+    Untracked files are counted but never refuse.  Harness state (`.claude/`, `.pi/`, build output,
+    virtualenvs) sits untracked in almost every real checkout, so treating it as dirty would refuse
+    nearly every takeover and train the operator to reach for the override flag without reading the
+    reason - which is worse for the work than the rare case it would catch.
+
+    A path git cannot answer for is reported `checked: False`, which refuses the close: absence of a
+    clean answer is not evidence of clean.
+    """
+    state = {"checked": False, "path": None, "is_repo": False, "branch": None, "tracked_changes": 0,
+             "untracked": 0, "unpushed": 0, "remotes": 0, "detail": ""}
+    if shutil.which("git") is None:
+        state["detail"] = "git is not installed, so the source worktree could not be inspected"
+        return state
+    if not path:
+        state["detail"] = "no source worktree to inspect"
+        return state
+    if not Path(path).is_dir():
+        state["detail"] = f"{path} is not a directory"
+        return state
+    ok, inside = _git_text(path, "rev-parse", "--is-inside-work-tree")
+    if not ok or inside != "true":
+        state["checked"] = True
+        state["path"] = str(path)
+        state["detail"] = f"{path} is not a git worktree"
+        return state
+    ok, top = _git_text(path, "rev-parse", "--show-toplevel")
+    if not ok or not top:
+        state["detail"] = f"{path}: git could not name its worktree root"
+        return state
+    state["checked"] = True
+    state["is_repo"] = True
+    state["path"] = top
+    ok, branch = _git_text(path, "rev-parse", "--abbrev-ref", "HEAD")
+    state["branch"] = branch if ok and branch else None
+    ok, status = _git_text(path, "status", "--porcelain", "--untracked-files=all")
+    if not ok:
+        state["detail"] = f"{top}: git status failed"
+        return state
+    for line in status.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("??"):
+            state["untracked"] += 1
+        else:
+            state["tracked_changes"] += 1
+    ok, remotes = _git_text(path, "remote")
+    state["remotes"] = len([line for line in remotes.splitlines() if line.strip()]) if ok else 0
+    ok, unpushed = _git_text(path, "rev-list", "--count", "HEAD", "--not", "--remotes")
+    state["unpushed"] = _count(unpushed) if ok else 0
+    if state["unpushed"] and state["remotes"] == 0:
+        state["detail"] = f"{top} has no remote: its commits exist only on this machine"
+    return state
+
+
+def worktree_close_refusal(state):
+    """The reason the source worktree refuses the close, or "" when it does not."""
+    if not state or not state.get("checked"):
+        return "worktree_unknown"
+    if not state.get("is_repo"):
+        return ""
+    if state.get("tracked_changes"):
+        return "worktree_dirty"
+    if state.get("unpushed"):
+        return "worktree_unpushed"
+    return ""
+
+
+def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confirmed, worktree=None,
+                          allow_dirty=False):
     """Decide whether the session being replaced may be closed - the whole safety gate in one pure call.
 
     Closing the source pane is destructive, so it is allowed only for a successor that is in the source
-    pane's own tab (the split succeeded), is a different pane, and has been observed live.  Anything else
-    refuses and says why, so the operator keeps both sessions.
+    pane's own tab (the split succeeded), is a different pane, has been observed live, and is not about
+    to orphan work the source worktree still holds.  Anything else refuses and says why, so the operator
+    keeps both sessions.
+
+    `worktree` is a `source_worktree_state` reading; leaving it out means the caller checked nothing.
+    `allow_dirty` speaks for the worktree only - it never buys a close for an unconfirmed successor or a
+    successor that landed outside the source tab.
     """
     if placement != "split" or not same_tab:
         return {"close": False, "reason": "not_same_tab"}
@@ -690,6 +791,10 @@ def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confi
         return {"close": False, "reason": "same_pane"}
     if not confirmed:
         return {"close": False, "reason": "unconfirmed"}
+    if worktree is not None and not allow_dirty:
+        refusal = worktree_close_refusal(worktree)
+        if refusal:
+            return {"close": False, "reason": refusal}
     return {"close": True, "reason": ""}
 
 

@@ -34,7 +34,7 @@ def test_existing_routes_and_handoff_aliases_are_preserved():
         "toOpenCode": "opencode",
     }.items():
         assert commands[alias] == {
-            "action": "handoff", "target_harness": harness,
+            "action": "handoff", "target_harness": harness, "mode": "takeover",
         }
     for command in (
         "artifact", "handoff", "review", "verify", "fabric", "publish",
@@ -43,9 +43,18 @@ def test_existing_routes_and_handoff_aliases_are_preserved():
         assert commands[command] == {"action": command}
 
 
+def test_to_harness_commands_replace_the_pane_by_default():
+    # Handing work to another harness means the successor takes the pane: leaving the source running by
+    # default left one agent answering a question another agent had already finished. Both panes is what
+    # `--keep-source` asks for, and a refusal keeps the source pane up too.
+    registry = json.loads((Path(__file__).parents[1] / "skill" / "herdr" / "commands.json").read_text())
+    for alias in ("toClaude", "toPi", "toCodex", "toOpenCode"):
+        assert registry["commands"][alias]["mode"] == "takeover"
+
+
 def test_takeover_is_a_namespaced_route_of_its_own():
-    # `to*` copies a session into a new pane; takeover replaces the pane, which is destructive, so it is
-    # a distinct action and never an alias of `handoff`.
+    # takeover replaces the pane, which is destructive, so it stays a distinct action and never an alias of
+    # `handoff`; `to*` routes to it via `mode`, and `handoff` alone still just queues the package.
     registry = json.loads((Path(__file__).parents[1] / "skill" / "herdr" / "commands.json").read_text())
     assert registry["commands"]["takeover"] == {"action": "takeover"}
     assert registry["commands"]["handoff"] == {"action": "handoff"}
