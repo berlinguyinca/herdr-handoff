@@ -9,7 +9,7 @@
 # In CI the journal goes to the first writable directory named by scripts/ci/log-archive.yml, written as the gate goes,
 # so even a killed step leaves its last lines on disk; anywhere else, or with none usable, it is a node-local temp
 # file.  The first line the gate prints names the file, and when no archive directory was usable it says on which
-# host and why.  Ported from the same helper in herdr-engineering (scripts/ci/journal.sh).
+# host and why.  Ported from the same helper, herdr-engineering/scripts/ci/journal.sh.
 ci_journal() {
   local gate="$1" cfg dir="" candidate target why=""
   cfg="$(dirname "${BASH_SOURCE[0]}")/log-archive.yml"

@@ -9,7 +9,8 @@ network. What is guarded here is the set of mistakes that make a CI config quiet
   the moment it is marked required in GitHub,
 * a gate that narrows the suite it claims to run,
 * a gate whose passing output never reaches the log, and test-only dependencies nobody installs, which turn
-  conformance tests into silent skips.
+  conformance tests into silent skips,
+* a comment that cites a file that does not exist, in this repository or anyone else's.
 """
 
 from __future__ import annotations
@@ -44,7 +45,8 @@ def test_the_pipeline_exists_and_names_the_gate_scripts_that_exist():
 
 
 def test_the_pipeline_reports_on_every_pull_request():
-    """A path-filtered check never reports on some PRs, so it cannot be made required (herdr-engineering ci-gates.md)."""
+    """A check filtered by paths reports nothing on a PR that touches no listed path, so it can never satisfy a
+    required-status check and the PR parks on 'waiting for status'.  The gate is cheap, so it runs on every PR."""
     pipeline = _text(PIPELINE)
     assert re.search(r"^\s*-\s*event:\s*pull_request\s*$", pipeline, re.MULTILINE), (
         "the pull_request trigger must be its own unconditional entry"
@@ -123,3 +125,23 @@ def test_the_gate_installs_what_the_schema_conformance_tests_need():
 
 def test_the_readme_names_the_command_that_reproduces_ci():
     assert "bash scripts/ci/unit-gates.sh" in _text(ROOT / "README.md")
+
+# A path written bare, with no repository prefix, claims to be a file in *this* repository.  An earlier revision of
+# the pipeline header cited herdr-engineering/docs/operations/ci-gates.md; no such file exists there -- the
+# conventions it describes are recorded in herdr-engineering/docs/operations/ui-gates.md -- and a citation to a
+# document nobody has sends the next reader on a search instead of informing them.  Cross-repository citations therefore have to carry the repository name, which
+# this rule exempts by construction; anything left bare must resolve here.
+_CITED_PATH = re.compile(r"(?<![\w./-])((?:docs|scripts|src|tests)/[\w./-]+\.(?:md|sh|py|yml|toml))")
+
+
+def test_every_bare_path_cited_by_the_ci_files_exists_in_this_repository():
+    for source in (
+        PIPELINE,
+        GATE,
+        ROOT / "scripts" / "ci" / "journal.sh",
+        ROOT / "scripts" / "ci" / "log-archive.yml",
+        ROOT / "README.md",
+        Path(__file__),
+    ):
+        for cited in sorted(set(_CITED_PATH.findall(_text(source)))):
+            assert (ROOT / cited).is_file(), f"{source.name} cites {cited}, which is not in this repository"
