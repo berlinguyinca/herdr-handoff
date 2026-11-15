@@ -1,0 +1,65 @@
+# Woodpecker CI (ci.metabolomics.us) -- the herdr-handoff gate: lint subset, shipped data files, conflict markers,
+# the whole unit suite.  The checks live in scripts/ci/unit-gates.sh, so `bash scripts/ci/unit-gates.sh` reproduces
+# this pipeline from a clean checkout and CI holds nothing that a local run does not.
+#
+# Conventions taken from herdr-engineering (docs/operations/ci-gates.md there): `image:` names an executable on the
+# agent rather than a container; skip_clone plus a plain git fetch of $CI_COMMIT_SHA using the credential the agent
+# stages at /etc/woodpecker-git-credentials; triggers include `manual`, so a run can be re-proved without pushing.
+#
+# Two deliberate differences, both cost-driven:
+#
+#   * One pipeline instead of the structural/unit split.  herdr-engineering separates a ~1.5 s structural gate from a
+#     ~55 min unit gate so that `main` can be gated per push without spending ~78 runner-hours a day.  The whole
+#     herdr-handoff gate is about 30 s, so the split buys nothing and `main` gets the full suite on every push.
+#   * No include filter on the pull_request trigger, so the check reports on every pull request, documentation-only
+#     ones included.  That is what makes it safe to mark required in GitHub: a filtered check never reports on the
+#     PRs it filters out, and a required check that never reports parks the PR on "waiting for status to be
+#     reported" with no way to satisfy it.
+#
+# Not run here, on purpose: the `integration` marker (16 tests) drives real harness CLIs -- claude, pi, codex,
+# opencode.  A step that skips because the binary is absent is green without proving anything, so it stays an opt-in
+# local run: `pytest -m integration` where those CLIs are installed.
+#
+# What the gate prints is part of the gate, and getting it into the log took three fixes, each measured on this repo's
+# own runs.  Pipelines 1 and 2 each reported `unit-gates: success exit 0` with a stored step log that stopped at
+# "== pytest ==": pytest is the script's last command and its report is one block-buffered flush landing in the same
+# instant the harness stops reading the step's pipe.  So the gate exports PYTHONUNBUFFERED, repeats the verdict as
+# `pytest: N passed ...`, and then sleeps 3 s before exiting -- lingering after the line is what delivers it, since
+# writing it last does not protect it: pipeline 3's recap arrived and pipeline 4's identical recap did not, the only
+# difference being six SKIPPED lines printed in front of it.
+# The run also mirrors itself to a journal (scripts/ci/journal.sh, directories in scripts/ci/log-archive.yml), but on
+# the agents this repo lands on the archive parent is not present -- pipeline 2 printed "log archive not used on
+# hive-as-11-2-39: /quobyte/metabolomicsgrp/it/server/woodpecker/ci-logs (parent missing or not writable)" and
+# journalled to node-local /tmp, exactly as herdr-engineering's own hive runs do.  The journal is a convenience for
+# whoever is on that host, not the record: the log has to carry the result itself.  pytest runs with -rs because the
+# agents have no `herdr`, no claude/pi/codex/opencode and no herdr-memory source tree, so a slice of the suite skips
+# there (pipeline 3: 117 passed, 11 skipped, where a workstation with those binaries sees 124 passed, 4 skipped); a
+# green step that was green because tests skipped is not evidence, so each skip is printed with its reason.  Read the
+# log with
+# `python3 scripts/ci/wp_log.py berlinguyinca/herdr-handoff <pipeline>` from a herdr-engineering checkout.
+when:
+  - event: manual
+  - event: pull_request
+  - event: push
+    branch: master
+
+skip_clone: true
+
+steps:
+  - name: checkout
+    image: bash
+    commands:
+      - 'set -eu'
+      - 'test -r /etc/woodpecker-git-credentials || { echo "the job staged no forge credential" >&2; exit 1; }'
+      - 'git init -q -b "${CI_COMMIT_BRANCH:-master}" .'
+      - 'git remote add origin "https://github.com/${CI_REPO}.git"'
+      # Depth 1 is enough: no test reads this repository's history, the suite builds its own throwaway repos in tmp.
+      - 'git fetch --no-tags --depth=1 origin "$CI_COMMIT_SHA"'
+      - 'git checkout -q FETCH_HEAD'
+      - 'git --no-pager log --oneline -1'
+
+  - name: unit-gates
+    image: bash
+    commands:
+      - 'set -eu'
+      - 'bash scripts/ci/unit-gates.sh'

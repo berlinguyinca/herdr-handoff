@@ -574,7 +574,6 @@ def main(argv=None):
             raise SystemExit(f"handoff must be queued before launch (state={package.get('state')})")
         control_url = os.environ.get("HERDR_CONTROL_PLANE_URL")
         control_token = os.environ.get("HERDR_API_KEY")
-        dashboard = "not_configured"
         if control_url:
             store.sync(control_url, token=control_token, handoff_id=args.handoff_id)
         try:
