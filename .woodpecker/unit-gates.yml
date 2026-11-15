@@ -2,7 +2,8 @@
 # the whole unit suite.  The checks live in scripts/ci/unit-gates.sh, so `bash scripts/ci/unit-gates.sh` reproduces
 # this pipeline from a clean checkout and CI holds nothing that a local run does not.
 #
-# Conventions taken from herdr-engineering (docs/operations/ci-gates.md there): `image:` names an executable on the
+# Conventions taken from herdr-engineering -- its herdr-engineering/docs/operations/ui-gates.md records the shape, and
+# herdr-engineering/.woodpecker/unit-gates.yml is the pipeline it describes: `image:` names an executable on the
 # agent rather than a container; skip_clone plus a plain git fetch of $CI_COMMIT_SHA using the credential the agent
 # stages at /etc/woodpecker-git-credentials; triggers include `manual`, so a run can be re-proved without pushing.
 #
@@ -36,7 +37,8 @@
 # there (pipeline 3: 117 passed, 11 skipped, where a workstation with those binaries sees 124 passed, 4 skipped); a
 # green step that was green because tests skipped is not evidence, so each skip is printed with its reason.  Read the
 # log with
-# `python3 scripts/ci/wp_log.py berlinguyinca/herdr-handoff <pipeline>` from a herdr-engineering checkout.
+# `python3 herdr-engineering/scripts/ci/wp_log.py berlinguyinca/herdr-handoff <pipeline>`, run from that checkout: the
+# log reader lives in that repository, not here.
 when:
   - event: manual
   - event: pull_request
