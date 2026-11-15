@@ -15,7 +15,7 @@ import time
 
 from herdr_handoff import (HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
-                            short_prompt, takeover_prompt, validate_takeover, _handoff_root)
+                            short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
 
 
 def _run(argv, *, capture=True):
@@ -133,7 +133,28 @@ def launch(package, *, root, parent_pane, cwd=None, store=None):
 _CONFIRM_POLL_SECONDS = 0.5
 _CONFIRM_OUTPUT_TIMEOUT_MS = 1000
 _CONFIRM_AGENT_WAIT_MS = 2000
-_TAKEOVER_REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed")
+_TAKEOVER_REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty")
+
+_WORKTREE_REFUSAL_HINTS = {
+    "worktree_dirty": "tracked changes are not committed",
+    "worktree_unpushed": "commits exist that no remote branch has",
+    "worktree_unknown": "git could not be asked whether the worktree is clean",
+}
+
+
+def _worktree_refusal_reason(token, guard):
+    """Say what the guard saw and what would clear it, in the space a terminal operator reads."""
+    where = guard.get("path") or "the source worktree"
+    facts = [guard["detail"]] if guard.get("detail") else []
+    if guard.get("tracked_changes"):
+        facts.append(f"{guard['tracked_changes']} tracked file(s) uncommitted")
+    if guard.get("unpushed"):
+        facts.append(f"{guard['unpushed']} commit(s) no remote has")
+    if guard.get("untracked") and token != "worktree_unknown":
+        facts.append(f"{guard['untracked']} untracked file(s) ignored by this check")
+    return (f"{token}: {where} ({', '.join(facts) or _WORKTREE_REFUSAL_HINTS.get(token, token)}); the "
+            "successor is live and the source pane was left running. Commit or push the work and run "
+            "takeover again, or pass --allow-dirty-source to close the source pane anyway.")
 
 
 def _pane_view(pane):
@@ -149,6 +170,16 @@ def _pane_tab(pane):
     view = _pane_view(pane)
     tab = (view or {}).get("tab_id")
     return tab if isinstance(tab, str) else None
+
+
+def _pane_cwd(pane):
+    """The directory herdr itself reports for `pane` - the worktree its session was sitting in."""
+    view = _pane_view(pane) or {}
+    for key in ("foreground_cwd", "cwd"):
+        value = view.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _agent_label(pane):
@@ -225,13 +256,18 @@ def close_pane(pane):
                 "reason": f"herdr refused to close the source pane: {detail.strip()[:200]}"}
 
 
-def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeout=25.0, keep_source=False):
+def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeout=25.0, keep_source=False,
+             source_cwd=None, allow_dirty=False):
     """Start the successor in the source pane's own tab, wait for proof it is live, close the source pane.
 
     Every step is written down before it happens, so a repeat trigger (or a crash between steps) either
     continues the recorded move or does nothing: a pane is never split twice and never closed twice.  When
-    proof of liveness never arrives, or the successor did not land in the source tab, the source pane is
-    left running and the refusal is reported instead.
+    proof of liveness never arrives, the successor did not land in the source tab, or the source worktree
+    still holds work that is not durable, the source pane is left running and the refusal is reported.
+
+    `source_cwd` names the worktree to guard; by default it is the directory herdr reports for the source
+    pane, falling back to this process's own directory.  `allow_dirty` is the operator's explicit
+    judgement that the work in that worktree may be left behind.
     """
     store = store or HandoffStore(root)
     handoff_id = package["handoff_id"]
@@ -333,23 +369,32 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
         return report("confirmed", block=block, source_closed=False)
 
     source_tab = _pane_tab(source_pane) if source_pane else None
+    guard = None
     if source_pane and source_tab is None:  # the session being replaced is already gone: nothing to close
         closed = {"closed": True, "already": True, "reason": "source pane was already closed"}
     else:
+        guard = source_worktree_state(source_cwd or _pane_cwd(source_pane) or os.getcwd())
         decision = decide_takeover_close(placement=placement, same_tab=source_tab is not None
                                          and source_tab == tab_id, source_pane=source_pane, child_pane=pane,
-                                         confirmed=True)
+                                         confirmed=True, worktree=guard, allow_dirty=allow_dirty)
         if not decision["close"]:
-            store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane,
-                                               "reason": decision["reason"]})
-            return report("launch_unconfirmed", block=block, source_closed=False, reason=decision["reason"])
+            # A placement refusal is the old `launch_unconfirmed`; a worktree refusal is its own status,
+            # because the thing to fix is the work, not the successor, and retrying changes nothing.
+            dirty = decision["reason"].startswith("worktree_")
+            status = "source_dirty" if dirty else "launch_unconfirmed"
+            reason = _worktree_refusal_reason(decision["reason"], guard) if dirty else decision["reason"]
+            store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": reason,
+                                               "evidence": {**(block.get("evidence") or {}),
+                                                            "worktree": guard}})
+            return report(status, block=block, source_closed=False, reason=reason, worktree=guard)
         closed = close_pane(source_pane)
         if not closed["closed"]:
             store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": closed["reason"]})
             return report("source_close_failed", block=block, source_closed=False, reason=closed["reason"])
     block = store.record_takeover(handoff_id, {"phase": "already_closed" if closed["already"] else "source_closed",
                                                 "child_pane": pane, "reason": closed["reason"] or None})["takeover"]
-    return report("source_closed", block=block, source_closed=True, reason=closed["reason"])
+    return report("source_closed", block=block, source_closed=True, reason=closed["reason"],
+                  **({"worktree": guard} if guard else {}))
 
 
 def confirm_takeover(store, handoff_id, *, pane=None):
@@ -447,7 +492,17 @@ def main(argv=None):
     launch_parser.add_argument("handoff_id")
     launch_parser.add_argument("--parent-pane", default=os.environ.get("HERDR_PANE_ID"))
     launch_parser.add_argument("--cwd", default=os.getcwd())
-    takeover_parser = sub.add_parser("takeover")
+    takeover_parser = sub.add_parser(
+        "takeover", formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=("refusals (exit 1, the source pane stays running, the successor is never orphaned):\n"
+                "  launch_unconfirmed    herdr never reported the successor live, or it left the source tab\n"
+                "  launch_failed         the successor pane could not be started at all\n"
+                "  source_close_failed   herdr refused the close\n"
+                "  source_dirty          the source worktree holds work that is not durable: uncommitted\n"
+                "                        tracked changes, or commits no remote branch has.  Untracked files\n"
+                "                        alone never refuse - harness state is untracked everywhere.\n"
+                "Do not retry a refusal blindly: make the work durable (commit, push), then run takeover\n"
+                "again, or close the source anyway with --allow-dirty-source."))
     takeover_parser.add_argument("handoff_id")
     takeover_parser.add_argument("--parent-pane", default=os.environ.get("HERDR_PANE_ID"))
     takeover_parser.add_argument("--cwd", default=os.getcwd())
@@ -455,6 +510,12 @@ def main(argv=None):
                                  help="seconds to wait for herdr to observe the successor before refusing to close")
     takeover_parser.add_argument("--keep-source", action="store_true",
                                  help="start and confirm the successor but leave the source pane running")
+    takeover_parser.add_argument("--source-cwd", default=None,
+                                 help="worktree to check before closing the source pane (default: the "
+                                      "directory herdr reports for that pane, else this one)")
+    takeover_parser.add_argument("--allow-dirty-source", action="store_true",
+                                 help="close the source pane even with uncommitted or unpushed work in it "
+                                      "(untracked files never block, so this flag is not needed for them)")
     confirm_parser = sub.add_parser("confirm")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
@@ -537,7 +598,8 @@ def main(argv=None):
             store.sync(control_url, token=control_token, handoff_id=args.handoff_id)
         try:
             out = takeover(package, root=store.root, parent_pane=args.parent_pane, cwd=args.cwd, store=store,
-                           confirm_timeout=args.confirm_timeout, keep_source=args.keep_source)
+                           confirm_timeout=args.confirm_timeout, keep_source=args.keep_source,
+                           source_cwd=args.source_cwd, allow_dirty=args.allow_dirty_source)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None      # e.g. no target harness named: say it, no traceback
         if out["status"] in ("confirmed", "source_closed"):

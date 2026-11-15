@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import wait_for_json
+from conftest import pushed_repo, wait_for_json
 from herdr_handoff import (TAKEOVER_PHASES, HandoffStore, build_handoff, build_launch_plan,
                            decide_takeover_close, short_prompt, takeover_prompt, validate_takeover,
                            _handoff_root)
@@ -341,3 +341,111 @@ def test_confirm_stamps_the_successor_pane_from_its_own_environment(live_herdr_s
     out = json.loads(done.stdout)
     assert out["phase"] == "confirmed" and out["pane_id"] == child
     assert source_state(root, package["handoff_id"])["takeover"]["confirmed_at"]
+
+
+# --- integration: the source worktree must hold nothing that dies with the pane ----------------------
+
+def takeover_args(root, handoff_id, source, cwd, *extra):
+    return ["--root", str(root), "takeover", handoff_id, "--parent-pane", source, "--cwd", str(cwd),
+            "--confirm-timeout", "30", *extra]
+
+
+@pytest.mark.integration
+def test_takeover_refuses_to_close_a_source_pane_holding_uncommitted_work(live_herdr_server, tmp_path):
+    # The successor is genuinely live; the reason not to close is that the source worktree still holds
+    # work that exists nowhere but this machine - so both panes stay up and the reason is printed.
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    repo = pushed_repo(tmp_path)
+    (repo / "README.md").write_text("half-finished edit\n", encoding="utf-8")
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(repo)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, repo), env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 1, done.stdout + done.stderr
+    out = json.loads(done.stdout)
+    assert out["status"] == "source_dirty" and out["source_closed"] is False
+    assert out["reason"].startswith("worktree_dirty") and "--allow-dirty-source" in out["reason"]
+    assert out["worktree"]["tracked_changes"] == 1 and out["worktree"]["path"]
+    assert source in panes(herdr, full) and out["pane_id"] in panes(herdr, full)  # nothing was lost
+    stored = source_state(root, package["handoff_id"])
+    assert stored["takeover"]["phase"] == "confirmed"          # the successor did confirm
+    assert "worktree_dirty" in stored["takeover"]["reason"]
+    assert stored["takeover"]["evidence"]["worktree"]["tracked_changes"] == 1
+
+    # the override is the operator's explicit judgement that the work is safe to leave behind
+    override = run_cli(takeover_args(root, package["handoff_id"], source, repo, "--allow-dirty-source"),
+                       env={**env, "HERDR_PANE_ID": source})
+    assert override.returncode == 0, override.stdout + override.stderr
+    out2 = json.loads(override.stdout)
+    assert out2["status"] == "source_closed" and out2["source_closed"] is True
+    assert source not in panes(herdr, full) and out2["pane_id"] in panes(herdr, full)
+
+
+@pytest.mark.integration
+def test_takeover_closes_a_source_pane_whose_only_dirt_is_untracked(live_herdr_server, tmp_path):
+    # Decided treatment: untracked harness state (.claude/, build output) is everywhere, so counting it
+    # would refuse nearly every takeover and train the operator to override the guard by reflex.
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    repo = pushed_repo(tmp_path)
+    (repo / "takeover-scratch.md").write_text("notes that were never committed\n", encoding="utf-8")
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(repo)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, repo), env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    out = json.loads(done.stdout)
+    assert out["status"] == "source_closed" and out["worktree"]["untracked"] == 1 and out["worktree"]["tracked_changes"] == 0
+    assert source not in panes(herdr, full) and out["pane_id"] in panes(herdr, full)
+
+
+@pytest.mark.integration
+def test_takeover_refuses_a_source_with_commits_no_remote_has_and_clears_once_pushed(live_herdr_server, tmp_path):
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    repo = pushed_repo(tmp_path)
+    (repo / "feature.py").write_text("def feature():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "feature.py"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=guard", "-c", "user.email=guard@example.invalid",
+                    "commit", "-q", "-m", "only on this machine"], check=True, capture_output=True)
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(repo)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    refused = run_cli(takeover_args(root, package["handoff_id"], source, repo), env={**env, "HERDR_PANE_ID": source})
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    out = json.loads(refused.stdout)
+    assert out["status"] == "source_dirty" and out["reason"].startswith("worktree_unpushed")
+    assert out["worktree"]["unpushed"] == 1 and source in panes(herdr, full)
+    subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "main"], check=True, capture_output=True)
+    again = run_cli(takeover_args(root, package["handoff_id"], source, repo), env={**env, "HERDR_PANE_ID": source})
+    assert again.returncode == 0, again.stdout + again.stderr
+    out2 = json.loads(again.stdout)
+    assert out2["status"] == "source_closed" and source not in panes(herdr, full)
+
+
+@pytest.mark.integration
+def test_source_cwd_names_the_worktree_the_guard_inspects(live_herdr_server, tmp_path):
+    # The pane may sit anywhere; the operator can name the worktree whose work the successor must not
+    # be the only copy of.
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    repo = pushed_repo(tmp_path)
+    (repo / "README.md").write_text("uncommitted\n", encoding="utf-8")
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(tmp_path)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, tmp_path, "--source-cwd", str(repo)),
+                   env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 1, done.stdout + done.stderr
+    out = json.loads(done.stdout)
+    assert out["status"] == "source_dirty" and out["worktree"]["tracked_changes"] == 1
+    assert source in panes(herdr, full)
