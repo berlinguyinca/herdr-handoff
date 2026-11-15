@@ -17,12 +17,21 @@
 #   4. tests       the whole unit suite.  The `integration` marker (real harness CLIs) is deselected by pyproject's
 #                  addopts; run `pytest -m integration` on a machine that has those installed.
 #
-# Why lint is a subset rather than `ruff check`: on this tree the full default set reports 53 findings, 22 of them
-# PLW1510 (`subprocess.run` without `check=`), which is deliberate in tests that assert on a non-zero exit, and the
-# rest import ordering plus preview rules that churn between ruff releases.  E4,E7,E9,F keeps the checks that find
-# real defects -- undefined names, unused imports, syntax and indentation errors -- and is stable across releases.
-# Widening it means editing the scope here and in tests/test_ci_config.py together, so the change is visible.
-# `ruff format` is not a gate either: 14 files are unformatted, and reformatting them would bury this change.
+# Why the lint scope is written out instead of left to defaults.  Measured with the pinned ruff (0.14.5) and
+# --isolated, on this tree:
+#   ruff check --isolated src tests                  -> All checks passed   (ruff's defaults ARE E4,E7,E9,F today)
+#   ruff check --isolated --select ALL src tests     -> Found 2069 errors   (666 E501, 343 S101, 297 ANN001, 168 ANN201)
+# So the scope is not a concession to existing dirt: it is ruff's own default set, named so it stops being a moving
+# target.  Defaults change between releases and, without an explicit scope, ruff also discovers configuration by
+# walking up from the checkout, so what blocks a merge could come from a file outside this repository.  E4,E7,E9,F is
+# the set that finds real defects -- undefined names, unused imports, syntax and indentation errors -- and saying it
+# literally means a ruff release cannot quietly widen or narrow this gate.  Widening it deliberately means editing the
+# scope here and in tests/test_ci_config.py together, so the change is visible.
+# `ruff format` is not a gate: `ruff format --check src tests` reports 15 files would be reformatted, and that churn
+# would bury the change it ships with.
+# Correction kept in place, because the number is tempting to re-add: an earlier revision of this comment said "the
+# full default set reports 53 findings, 22 of them PLW1510".  That came from a broader --select in a venv that no
+# longer exists and cannot be reproduced; the commands above produce the numbers above.
 # Output is journalled (scripts/ci/journal.sh): the CI agent drops the tail of a step log, and on pipeline 1 the
 # unit-gates step stored nine lines ending at "== pytest ==" -- success, exit 0, with the suite's own summary lost.
 set -euo pipefail

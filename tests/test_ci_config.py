@@ -79,7 +79,9 @@ def test_the_gate_installs_the_package_and_runs_the_whole_unit_suite():
 def test_the_gate_lints_the_documented_scope_and_says_why_it_is_a_subset():
     gate = _text(GATE)
     assert LINT_SCOPE in gate, "the lint scope changed; this test and the gate header must be edited together"
-    assert "PLW1510" in gate, "the header must say which findings the scope leaves out, and why"
+    # The header has to justify the scope with something a reader can re-run, not with a number nobody can reproduce.
+    assert "--isolated" in gate and "--select ALL" in gate, "the header must show how its lint figures were measured"
+    assert "ruff format" in gate, "the header must say why formatting is not part of the gate"
 
 
 def test_the_gate_proves_the_shipped_data_files_parse():
