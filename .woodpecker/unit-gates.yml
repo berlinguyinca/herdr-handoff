@@ -20,11 +20,16 @@
 # opencode.  A step that skips because the binary is absent is green without proving anything, so it stays an opt-in
 # local run: `pytest -m integration` where those CLIs are installed.
 #
-# The gate journals its output (scripts/ci/journal.sh + scripts/ci/log-archive.yml), which is worth the two extra files:
-# the first run of this pipeline (pipeline 1) reported `unit-gates: success exit 0` while the stored step log held
-# nine lines ending at "== pytest ==" -- the suite had run and passed, and the agent dropped the summary.  A gate you
-# cannot read can only be trusted, so the run mirrors itself to the archive directory the agent can write, and names
-# that file on its first lines.  The server copy is still worth reading:
+# What the gate prints is part of the gate, and getting it into the log took two fixes, both measured on this repo's
+# own runs.  Pipelines 1 and 2 each reported `unit-gates: success exit 0` with a stored step log that stopped at
+# "== pytest ==": pytest is the script's last command and its report is one block-buffered flush, which lands in the
+# same instant the harness stops reading the step's pipe.  So the gate exports PYTHONUNBUFFERED and repeats the verdict
+# on a final `pytest: N passed ...` line with nothing after it to lose.
+# The run also mirrors itself to a journal (scripts/ci/journal.sh, directories in scripts/ci/log-archive.yml), but on
+# the agents this repo lands on the archive parent is not present -- pipeline 2 printed "log archive not used on
+# hive-as-11-2-39: /quobyte/metabolomicsgrp/it/server/woodpecker/ci-logs (parent missing or not writable)" and
+# journalled to node-local /tmp, exactly as herdr-engineering's own hive runs do.  The journal is a convenience for
+# whoever is on that host, not the record: the log has to carry the result itself.  Read it with
 # `python3 scripts/ci/wp_log.py berlinguyinca/herdr-handoff <pipeline>` from a herdr-engineering checkout.
 when:
   - event: manual

@@ -97,6 +97,10 @@ def test_the_gate_journals_because_the_agent_drops_the_log_tail():
     assert "journal.sh" in gate and "ci_journal unit-gates" in gate, "the gate does not journal its output"
     assert "tee" in _text(ROOT / "scripts" / "ci" / "journal.sh")
     assert "ci-logs" in _text(ROOT / "scripts" / "ci" / "log-archive.yml"), "no archive directory named"
+    # Pipelines 1 and 2 both lost everything after "== pytest ==", so the verdict has to be said unbuffered and
+    # repeated on the last line the step writes.
+    assert "PYTHONUNBUFFERED" in gate, "pytest's report is one buffered flush at exit; the harness stops reading then"
+    assert "pytest: " in gate, "the step must end with its own one-line verdict"
 
 
 def test_the_readme_names_the_command_that_reproduces_ci():

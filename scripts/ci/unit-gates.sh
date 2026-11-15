@@ -29,6 +29,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 . "$(dirname "$0")/journal.sh"; ci_journal unit-gates
 
+# The harness reads a step's output through a pipe and stops when the step's process exits, so anything still sitting
+# in a Python buffer at that instant never reaches the log.  pytest is the last command here and its whole report is
+# one block-buffered flush: pipelines 1 and 2 on ci.metabolomics.us both ended their stored log at "== pytest ==" for
+# a suite that passed.  Unbuffered output makes each line land as it is produced.
+export PYTHONUNBUFFERED=1
+
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing on this host: $1" >&2; exit 1; }; }
 need python3
 need git
@@ -87,4 +93,10 @@ case $status in
 esac
 
 echo "== pytest =="
-python -m pytest -q
+# Keep the run's own log and repeat its verdict after a short drain: the summary is the one line an operator needs,
+# and it is the line the race costs.  Nothing is printed after it, so it cannot be the tail that is lost.
+status=0
+python -m pytest -q 2>&1 | tee "$venv/pytest.log" || status=${PIPESTATUS[0]}
+sleep 2
+tail -n 1 "$venv/pytest.log" | sed 's/^/pytest: /'
+exit "$status"
