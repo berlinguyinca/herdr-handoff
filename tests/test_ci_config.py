@@ -7,12 +7,15 @@ network. What is guarded here is the set of mistakes that make a CI config quiet
 * a pipeline whose referenced script does not exist (red herring on every PR),
 * a `path:` include filter that stops the pipeline reporting on some pull requests, which makes it unsatisfiable
   the moment it is marked required in GitHub,
-* a gate that narrows the suite it claims to run.
+* a gate that narrows the suite it claims to run,
+* a gate whose passing output never reaches the log, and test-only dependencies nobody installs, which turn
+  conformance tests into silent skips.
 """
 
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -101,6 +104,15 @@ def test_the_gate_journals_because_the_agent_drops_the_log_tail():
     # repeated on the last line the step writes.
     assert "PYTHONUNBUFFERED" in gate, "pytest's report is one buffered flush at exit; the harness stops reading then"
     assert "pytest: " in gate, "the step must end with its own one-line verdict"
+    assert "-rs" in gate, "skips must be listed with reasons: a step green because tests skipped proves nothing"
+
+
+def test_the_gate_installs_what_the_schema_conformance_tests_need():
+    """Two tests validate the published schema via importorskip, and skipped silently until the gate declared it."""
+    dev = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["optional-dependencies"]["dev"]
+    assert any("jsonschema" in d for d in dev), "schemas/handoff-v2.schema.json goes unvalidated without it"
+    gate = _text(GATE)
+    assert "'.[dev]'" in gate, "the gate must install the declared dev extra, not a private copy of the tool list"
 
 
 def test_the_readme_names_the_command_that_reproduces_ci():

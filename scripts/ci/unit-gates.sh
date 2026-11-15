@@ -96,7 +96,9 @@ echo "== pytest =="
 # Keep the run's own log and repeat its verdict after a short drain: the summary is the one line an operator needs,
 # and it is the line the race costs.  Nothing is printed after it, so it cannot be the tail that is lost.
 status=0
-python -m pytest -q 2>&1 | tee "$venv/pytest.log" || status=${PIPESTATUS[0]}
+# -rs, not a bare -q: on the agents the harness CLIs and the herdr binary are absent, and a suite that is green
+# because it skipped is not evidence.  The reasons have to be in the log for whoever reads the run.
+python -m pytest -q -rs 2>&1 | tee "$venv/pytest.log" || status=${PIPESTATUS[0]}
 sleep 2
 tail -n 1 "$venv/pytest.log" | sed 's/^/pytest: /'
 exit "$status"

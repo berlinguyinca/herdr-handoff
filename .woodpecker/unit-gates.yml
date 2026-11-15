@@ -29,7 +29,11 @@
 # the agents this repo lands on the archive parent is not present -- pipeline 2 printed "log archive not used on
 # hive-as-11-2-39: /quobyte/metabolomicsgrp/it/server/woodpecker/ci-logs (parent missing or not writable)" and
 # journalled to node-local /tmp, exactly as herdr-engineering's own hive runs do.  The journal is a convenience for
-# whoever is on that host, not the record: the log has to carry the result itself.  Read it with
+# whoever is on that host, not the record: the log has to carry the result itself.  pytest runs with -rs because the
+# agents have no `herdr`, no claude/pi/codex/opencode and no herdr-memory source tree, so a slice of the suite skips
+# there (pipeline 3: 117 passed, 11 skipped, where a workstation with those binaries sees 124 passed, 4 skipped); a
+# green step that was green because tests skipped is not evidence, so each skip is printed with its reason.  Read the
+# log with
 # `python3 scripts/ci/wp_log.py berlinguyinca/herdr-handoff <pipeline>` from a herdr-engineering checkout.
 when:
   - event: manual
