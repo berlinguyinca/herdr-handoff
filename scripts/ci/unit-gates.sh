@@ -99,6 +99,9 @@ status=0
 # -rs, not a bare -q: on the agents the harness CLIs and the herdr binary are absent, and a suite that is green
 # because it skipped is not evidence.  The reasons have to be in the log for whoever reads the run.
 python -m pytest -q -rs 2>&1 | tee "$venv/pytest.log" || status=${PIPESTATUS[0]}
-sleep 2
 tail -n 1 "$venv/pytest.log" | sed 's/^/pytest: /'
+# Stay alive for a moment after the verdict, because the agent's log shipper trails the process.  Writing the verdict
+# last does not protect it: pipeline 3's recap arrived and pipeline 4's identical recap did not, the only difference
+# being that -rs put six more lines in front of it.  The line has to be followed by quiet, not by process exit.
+sleep 3
 exit "$status"

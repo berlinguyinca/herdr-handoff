@@ -105,6 +105,10 @@ def test_the_gate_journals_because_the_agent_drops_the_log_tail():
     assert "PYTHONUNBUFFERED" in gate, "pytest's report is one buffered flush at exit; the harness stops reading then"
     assert "pytest: " in gate, "the step must end with its own one-line verdict"
     assert "-rs" in gate, "skips must be listed with reasons: a step green because tests skipped proves nothing"
+    # pipeline 4 lost the verdict line itself; pipeline 3's survived.  The difference was what the shipper had time to
+    # send before the process exited, so the script must outlive its own last line.
+    assert gate.index("sed 's/^/pytest: /'") < gate.index("exit \"$status\""), "verdict must be printed before exit"
+    assert gate.index("sleep 3") > gate.index("sed 's/^/pytest: /'"), "the step must linger after the verdict"
 
 
 def test_the_gate_installs_what_the_schema_conformance_tests_need():
