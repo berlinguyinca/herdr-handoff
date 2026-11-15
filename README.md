@@ -157,7 +157,9 @@ That is the whole gate CI runs: [ci.metabolomics.us](https://ci.metabolomics.us)
 `.woodpecker/unit-gates.yml` on every pull request, on every push to `master`, and on a manual run. It builds a
 throwaway venv (`pip install -e '.[dev]'`), runs `ruff check` over the correctness subset `E4,E7,E9,F`, parses every
 tracked `.json` and `.toml`, scans tracked files for unresolved conflict markers, then runs the unit suite. It installs
-nothing system-wide and needs only `python3` (3.12+), `git` and PyPI reachability.
+nothing system-wide and needs only `python3` (3.12+), `git` and PyPI reachability. The run mirrors its own output to a
+journal (`scripts/ci/journal.sh`, archive directories in `scripts/ci/log-archive.yml`), because the CI agent drops the
+tail of a step log — the first pipeline here stored nine lines ending at "== pytest ==" for a passing suite.
 
 The `integration` marker is deliberately outside the gate: those tests drive the real `claude`, `pi`, `codex` and
 `opencode` CLIs, and a step that skips because a binary is missing is green without proving anything. Run them where

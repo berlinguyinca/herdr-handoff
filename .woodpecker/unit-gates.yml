@@ -20,8 +20,11 @@
 # opencode.  A step that skips because the binary is absent is green without proving anything, so it stays an opt-in
 # local run: `pytest -m integration` where those CLIs are installed.
 #
-# No journal either (herdr-engineering mirrors its gate output to a durable directory): its reason is a 55-minute
-# step killed mid-suite.  This run is ~30 s and the server keeps the step log; read it with
+# The gate journals its output (scripts/ci/journal.sh + scripts/ci/log-archive.yml), which is worth the two extra files:
+# the first run of this pipeline (pipeline 1) reported `unit-gates: success exit 0` while the stored step log held
+# nine lines ending at "== pytest ==" -- the suite had run and passed, and the agent dropped the summary.  A gate you
+# cannot read can only be trusted, so the run mirrors itself to the archive directory the agent can write, and names
+# that file on its first lines.  The server copy is still worth reading:
 # `python3 scripts/ci/wp_log.py berlinguyinca/herdr-handoff <pipeline>` from a herdr-engineering checkout.
 when:
   - event: manual

@@ -23,8 +23,11 @@
 # real defects -- undefined names, unused imports, syntax and indentation errors -- and is stable across releases.
 # Widening it means editing the scope here and in tests/test_ci_config.py together, so the change is visible.
 # `ruff format` is not a gate either: 14 files are unformatted, and reformatting them would bury this change.
+# Output is journalled (scripts/ci/journal.sh): the CI agent drops the tail of a step log, and on pipeline 1 the
+# unit-gates step stored nine lines ending at "== pytest ==" -- success, exit 0, with the suite's own summary lost.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+. "$(dirname "$0")/journal.sh"; ci_journal unit-gates
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing on this host: $1" >&2; exit 1; }; }
 need python3

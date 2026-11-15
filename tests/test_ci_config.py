@@ -87,5 +87,17 @@ def test_the_gate_proves_the_shipped_data_files_parse():
     assert "<<<<<<<" in gate, "no conflict-marker scan"
 
 
+def test_the_gate_journals_because_the_agent_drops_the_log_tail():
+    """ci.metabolomics.us pipeline 1: `unit-gates: success exit 0`, and the stored step log ended at "== pytest ==".
+
+    The suite had run and passed; its summary was not in the log.  Readable output is part of the gate, so the run
+    mirrors itself to an archive directory and prints where.
+    """
+    gate = _text(GATE)
+    assert "journal.sh" in gate and "ci_journal unit-gates" in gate, "the gate does not journal its output"
+    assert "tee" in _text(ROOT / "scripts" / "ci" / "journal.sh")
+    assert "ci-logs" in _text(ROOT / "scripts" / "ci" / "log-archive.yml"), "no archive directory named"
+
+
 def test_the_readme_names_the_command_that_reproduces_ci():
     assert "bash scripts/ci/unit-gates.sh" in _text(ROOT / "README.md")
