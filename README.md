@@ -146,3 +146,23 @@ Config, harness and project come from the CLI's own `HERDR_MEMORY_CONFIG`/`HERDR
 (and optional `HERDR_MEMORY_PROJECT`). `HERDR_MEMORY_BIN` may be a command line such as
 `python3 -m herdr_memory.cli`. `tests/test_memory_cli_integration.py` runs the real
 herdr-memory CLI (source tree via `HERDR_MEMORY_SRC`) against a local fake Hindsight server.
+
+## Development and CI
+
+```sh
+bash scripts/ci/unit-gates.sh
+```
+
+That is the whole gate CI runs: [ci.metabolomics.us](https://ci.metabolomics.us) executes this same script through
+`.woodpecker/unit-gates.yml` on every pull request, on every push to `master`, and on a manual run. It builds a
+throwaway venv (`pip install -e '.[dev]'`), runs `ruff check` over the correctness subset `E4,E7,E9,F`, parses every
+tracked `.json` and `.toml`, scans tracked files for unresolved conflict markers, then runs the unit suite. It installs
+nothing system-wide and needs only `python3` (3.12+), `git` and PyPI reachability.
+
+The `integration` marker is deliberately outside the gate: those tests drive the real `claude`, `pi`, `codex` and
+`opencode` CLIs, and a step that skips because a binary is missing is green without proving anything. Run them where
+the harnesses are installed:
+
+```sh
+pip install -e '.[dev]' && pytest -m integration
+```

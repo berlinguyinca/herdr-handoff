@@ -1,14 +1,10 @@
 import json
-import os
 import stat
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import herdr_handoff as hh
 from herdr_handoff import (HandoffStore, build_handoff, build_memory_context, resolve_memory_refs,
                            resume_prompt, validate_memory_context)
 

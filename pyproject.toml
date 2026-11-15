@@ -8,6 +8,11 @@ version = "0.4.0"
 description = "Portable handoff packages for Herdr harnesses"
 requires-python = ">=3.12"
 
+[project.optional-dependencies]
+# The gate's own tools (scripts/ci/unit-gates.sh).  ruff is pinned exactly: the gate selects a small rule set, and an
+# unpinned ruff lets a release decide whether CI is green.
+dev = ["pytest>=8", "ruff==0.14.5"]
+
 [project.scripts]
 herdr-handoff = "herdr_handoff_cli:main"
 

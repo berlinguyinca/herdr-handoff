@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# The herdr-handoff gate, as ci.metabolomics.us runs it (.woodpecker/unit-gates.yml) and as anyone can run it from a
+# clean checkout:
+#
+#     bash scripts/ci/unit-gates.sh
+#
+# Installs nothing system-wide: the CI agent has no sudo and no package manager, so the gate builds a throwaway venv
+# and throws it away.  Needs python3 (3.12+), git, and PyPI reachable from the host.
+#
+# Four checks, ordered by how fast they can say no:
+#
+#   1. lint        ruff, restricted to the correctness subset -- see the note below.
+#   2. data files  every tracked .json and .toml parses.  skill/herdr/commands.json and schemas/handoff-v2.schema.json
+#                  are read by harnesses and by other repositories, and a file that does not parse fails in someone
+#                  else's tool, not here.
+#   3. markers     no unresolved merge-conflict marker in a tracked file.
+#   4. tests       the whole unit suite.  The `integration` marker (real harness CLIs) is deselected by pyproject's
+#                  addopts; run `pytest -m integration` on a machine that has those installed.
+#
+# Why lint is a subset rather than `ruff check`: on this tree the full default set reports 53 findings, 22 of them
+# PLW1510 (`subprocess.run` without `check=`), which is deliberate in tests that assert on a non-zero exit, and the
+# rest import ordering plus preview rules that churn between ruff releases.  E4,E7,E9,F keeps the checks that find
+# real defects -- undefined names, unused imports, syntax and indentation errors -- and is stable across releases.
+# Widening it means editing the scope here and in tests/test_ci_config.py together, so the change is visible.
+# `ruff format` is not a gate either: 14 files are unformatted, and reformatting them would bury this change.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing on this host: $1" >&2; exit 1; }; }
+need python3
+need git
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' \
+  || { echo "needs Python 3.12 or newer, found $(python3 -V 2>&1)" >&2; exit 1; }
+
+venv="$(mktemp -d "${TMPDIR:-/tmp}/herdr-handoff-gates-venv.XXXXXX")"
+trap 'rm -rf "$venv"' EXIT
+python3 -m venv "$venv"
+"$venv/bin/pip" install -q --upgrade pip >/dev/null
+"$venv/bin/pip" install -q -e '.[dev]'
+export PATH="$venv/bin:$PATH"
+
+echo "== ruff: $(ruff --version) =="
+ruff check src tests --select E4,E7,E9,F
+
+echo "== tracked data files =="
+python3 - <<'PY'
+import json
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+names = subprocess.run(["git", "ls-files", "-z"], capture_output=True, check=True).stdout.decode().split("\0")
+parsed, broken = 0, []
+for name in names:
+    if not name or not Path(name).is_file():
+        continue
+    loader = json.loads if name.endswith(".json") else tomllib.loads if name.endswith(".toml") else None
+    if loader is None:
+        continue
+    try:
+        loader(Path(name).read_text(encoding="utf-8"))
+        parsed += 1
+    except Exception as exc:
+        broken.append(f"{name}: {type(exc).__name__}: {exc}")
+for line in broken:
+    print(line, file=sys.stderr)
+if broken:
+    raise SystemExit(f"{len(broken)} tracked data file(s) do not parse")
+print(f"{parsed} tracked json/toml file(s) parse")
+PY
+
+echo "== conflict markers =="
+# Only the two ends of a conflict marker, not the `=======` divider: an all-equals line is a legitimate heading in
+# reStructuredText and Markdown, and git itself only ever writes seven of them between the two markers below.
+set +e
+matches=$(git grep -nE '^(<<<<<<< |>>>>>>> )' -- . 2>&1)
+status=$?
+set -e
+case $status in
+  0) echo "unresolved merge conflict marker(s):" >&2; echo "$matches" >&2; exit 1 ;;
+  1) echo "no conflict markers" ;;                       # grep's "nothing matched" is the pass
+  *) echo "git grep failed (exit $status): $matches" >&2; exit 1 ;;
+esac
+
+echo "== pytest =="
+python -m pytest -q
