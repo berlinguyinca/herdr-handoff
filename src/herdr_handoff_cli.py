@@ -15,7 +15,7 @@ import time
 
 from herdr_handoff import (HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
-                            short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
+                            running_subagents, short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
 
 
 def _run(argv, *, capture=True):
@@ -133,7 +133,8 @@ def launch(package, *, root, parent_pane, cwd=None, store=None):
 _CONFIRM_POLL_SECONDS = 0.5
 _CONFIRM_OUTPUT_TIMEOUT_MS = 1000
 _CONFIRM_AGENT_WAIT_MS = 2000
-_TAKEOVER_REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty")
+_TAKEOVER_REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty",
+                              "subagents_running")
 
 _WORKTREE_REFUSAL_HINTS = {
     "worktree_dirty": "tracked changes are not committed",
@@ -257,7 +258,7 @@ def close_pane(pane):
 
 
 def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeout=25.0, keep_source=False,
-             source_cwd=None, allow_dirty=False):
+             source_cwd=None, allow_dirty=False, allow_running_subagents=False):
     """Start the successor in the source pane's own tab, wait for proof it is live, close the source pane.
 
     Every step is written down before it happens, so a repeat trigger (or a crash between steps) either
@@ -267,7 +268,9 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
 
     `source_cwd` names the worktree to guard; by default it is the directory herdr reports for the source
     pane, falling back to this process's own directory.  `allow_dirty` is the operator's explicit
-    judgement that the work in that worktree may be left behind.
+    judgement that the work in that worktree may be left behind.  Claude subagents still running from the
+    source pane would die with it, so unless `allow_running_subagents` or `keep_source` says otherwise the
+    takeover is refused before anything is launched.
     """
     store = store or HandoffStore(root)
     handoff_id = package["handoff_id"]
@@ -307,6 +310,16 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
     if not child and not source_pane:
         raise SystemExit("takeover needs the source pane identity (HERDR_PANE_ID or --parent-pane); "
                          "use `launch` to hand off without closing anything")
+
+    if not child and source_pane and not keep_source and not allow_running_subagents:
+        running = running_subagents(source_pane)
+        if running:
+            return {"handoff_id": handoff_id, "target_harness": harness, "status": "subagents_running",
+                    "reason": f"{len(running)} subagent(s) launched from the source pane are still running",
+                    "hint": "wait for them or stop them, then rerun; or pass --allow-running-subagents / "
+                            "--keep-source",
+                    "subagents": running, "source_pane": source_pane, "pane_id": None, "tab_id": None,
+                    "placement": None, "document": document, "source_closed": False, "idempotent": False}
 
     label = f"to-{harness}-{handoff_id[-8:]}"
     if child:
@@ -501,6 +514,9 @@ def main(argv=None):
                 "  source_dirty          the source worktree holds work that is not durable: uncommitted\n"
                 "                        tracked changes, or commits no remote branch has.  Untracked files\n"
                 "                        alone never refuse - harness state is untracked everywhere.\n"
+                "  subagents_running     Claude subagents launched from the source pane are still running\n"
+                "                        (checked before anything is launched; the handoff stays queued).\n"
+                "                        Wait for them or stop them, or pass --allow-running-subagents.\n"
                 "Do not retry a refusal blindly: make the work durable (commit, push), then run takeover\n"
                 "again, or close the source anyway with --allow-dirty-source."))
     takeover_parser.add_argument("handoff_id")
@@ -516,6 +532,9 @@ def main(argv=None):
     takeover_parser.add_argument("--allow-dirty-source", action="store_true",
                                  help="close the source pane even with uncommitted or unpushed work in it "
                                       "(untracked files never block, so this flag is not needed for them)")
+    takeover_parser.add_argument("--allow-running-subagents", action="store_true",
+                                 help="hand off even though Claude subagents launched from the source pane "
+                                      "are still running (they die when the pane closes)")
     confirm_parser = sub.add_parser("confirm")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
@@ -598,7 +617,8 @@ def main(argv=None):
         try:
             out = takeover(package, root=store.root, parent_pane=args.parent_pane, cwd=args.cwd, store=store,
                            confirm_timeout=args.confirm_timeout, keep_source=args.keep_source,
-                           source_cwd=args.source_cwd, allow_dirty=args.allow_dirty_source)
+                           source_cwd=args.source_cwd, allow_dirty=args.allow_dirty_source,
+                           allow_running_subagents=args.allow_running_subagents)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None      # e.g. no target harness named: say it, no traceback
         if out["status"] in ("confirmed", "source_closed"):

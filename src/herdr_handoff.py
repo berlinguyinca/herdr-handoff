@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import urllib.request
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -693,6 +694,51 @@ def _count(value):
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+_SUBAGENT_STALE_SECONDS = 6 * 3600
+_DEFAULT_ENGINEERING_STATE = Path("~/.local/share/herdr-engineering/state")
+
+
+def sanitize_pane_id(pane):
+    """The registry's directory name for a pane: every char outside [A-Za-z0-9_.:-] becomes `_`."""
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", pane)
+
+
+def subagent_registry_dir(pane):
+    """`$HERDR_ENGINEERING_STATE/subagents/<pane>/`, where the writer records one file per running subagent."""
+    root = os.environ.get("HERDR_ENGINEERING_STATE")
+    base = Path(root) if root else _DEFAULT_ENGINEERING_STATE.expanduser()
+    return base / "subagents" / sanitize_pane_id(pane)
+
+
+def running_subagents(pane, *, now=None):
+    """Live subagent entries recorded for `pane`; a missing registry means none.
+
+    An entry older than six hours (by `started`, or by mtime when its JSON is unreadable) is stale: it is
+    ignored and never deleted, because a crashed subagent must not pin a pane open forever.
+    """
+    folder = subagent_registry_dir(pane)
+    now = time.time() if now is None else now
+    live = []
+    try:
+        entries = sorted(item for item in folder.iterdir() if item.is_file())
+    except OSError:
+        return live
+    for entry in entries:
+        try:
+            data = json.loads(entry.read_text(encoding="utf-8"))
+            started = float(data["started"])
+            agent_id, agent_type = str(data.get("agent_id") or entry.name), str(data.get("agent_type") or "")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            try:
+                started = entry.stat().st_mtime
+            except OSError:
+                continue
+            agent_id, agent_type = entry.name, ""
+        if now - started <= _SUBAGENT_STALE_SECONDS:
+            live.append({"agent_id": agent_id, "agent_type": agent_type, "started": started})
+    return live
 
 
 def source_worktree_state(path):

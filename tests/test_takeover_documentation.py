@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "src" / "herdr_handoff_cli.py"
 
 OPERATOR_TEXT = ("README.md", "skill/herdr/SKILL.md", "skill/herdr-handoff/SKILL.md")
-REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty")
+REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty",
+                    "subagents_running")
 
 
 def _text(relative):
