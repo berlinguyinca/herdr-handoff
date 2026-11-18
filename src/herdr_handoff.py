@@ -427,7 +427,7 @@ def _bullets(items, empty="(none recorded)"):
 def pane_label(cwd, goal, handoff_id, *, max_words=8):
     """Distinctive pane name: ``<project>: <first sentence of the goal, at most max_words words>``."""
     project = os.path.basename(os.path.abspath(cwd or ".")) or "handoff"
-    flat = re.sub(r"[#*`>_]+", " ", goal if isinstance(goal, str) else "")
+    flat = re.sub(r"[#*`]+", " ", goal if isinstance(goal, str) else "")
     sentence = re.split(r"(?<=[.!?])\s", " ".join(flat.split()), maxsplit=1)[0].rstrip(".!?")
     words = sentence.split()
     summary = " ".join(words[:max_words]) if words else f"handoff {handoff_id[-8:]}"
