@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from herdr_handoff import (HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
+from herdr_handoff import (HandoffStore, pane_label, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
                             running_subagents, short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
 
@@ -67,7 +67,7 @@ def _announce_pane(pane, *, label, harness, handoff_id):
     """Label the pane and register the handoff as its agent session, so herdr can show and detect it."""
     _run(["herdr", "pane", "rename", pane, label])
     _run(["herdr", "pane", "report-metadata", pane, "--source", "herdr-handoff",
-          "--title", f"handoff -> {harness}", "--token", f"handoff_id={handoff_id}"])
+          "--title", label, "--token", f"handoff_id={handoff_id}"])
     _run(["herdr", "pane", "report-agent-session", pane, "--source", "herdr-handoff",
           "--agent", harness, "--agent-session-id", handoff_id, "--session-start-source", "herdr-handoff"])
 
@@ -117,7 +117,7 @@ def launch(package, *, root, parent_pane, cwd=None, store=None):
               "resume_command": f"herdr-handoff --root {shlex.quote(str(root))} resume {package['handoff_id']}"}
     if not shutil.which("herdr"):
         return {**manual, "reason": "herdr is not installed; run the command in a terminal"}
-    label = f"to-{harness}-{package['handoff_id'][-8:]}"
+    label = pane_label(cwd, (package.get("context") or {}).get("goal"), package["handoff_id"])
     try:
         pane, result, placement = _place(plan, parent_pane, cwd, label)
     except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError) as exc:
@@ -321,7 +321,7 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                     "subagents": running, "source_pane": source_pane, "pane_id": None, "tab_id": None,
                     "placement": None, "document": document, "source_closed": False, "idempotent": False}
 
-    label = f"to-{harness}-{handoff_id[-8:]}"
+    label = pane_label(cwd, (package.get("context") or {}).get("goal"), handoff_id)
     if child:
         pane, placement, tab_id = child, recorded.get("placement") or "split", recorded.get("tab_id")
         if _pane_tab(pane) is None:
