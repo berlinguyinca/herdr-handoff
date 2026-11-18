@@ -41,7 +41,7 @@ Routing rules:
   `herdr-handoff confirm`, the current pane is closed. A trailing model is a
   hint only. Use `--keep-source` when the user wants both sessions running, and
   report a refusal (`launch_unconfirmed`, `launch_failed`,
-  `source_close_failed`, `source_dirty`) instead of closing anything by hand.
+  `source_close_failed`, `source_dirty`, `subagents_running`) instead of closing anything by hand.
 - `artifact` delegates to the installed `herdr-artifact` skill and defaults to
   the current authorized session context.
 - `handoff` delegates to `herdr-handoff`.

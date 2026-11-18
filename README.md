@@ -65,7 +65,7 @@ JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
 ```sh
 herdr-handoff takeover HANDOFF_ID [--parent-pane PANE] [--cwd DIR] \
-  [--confirm-timeout 25] [--keep-source] [--source-cwd DIR] [--allow-dirty-source]
+  [--confirm-timeout 25] [--keep-source] [--source-cwd DIR] [--allow-dirty-source] [--allow-running-subagents]
 ```
 
 `takeover` is `launch` for a session that is being replaced rather than copied:
@@ -76,9 +76,15 @@ needs proof first — herdr has to report an agent in the child pane in a settle
 state and show the handoff id in its output — and the source worktree has to
 hold nothing that exists only there. It refuses (exit 1, both panes left
 running) with statuses `launch_unconfirmed`, `launch_failed`,
-`source_close_failed`, `source_dirty`; the recorded phase is `unconfirmed` for
+`source_close_failed`, `source_dirty`, `subagents_running`; the recorded phase is `unconfirmed` for
 the launch refusals, and `confirmed` with the worktree reason for
 `source_dirty`.
+
+`subagents_running` is checked first, before anything is launched: Claude subagents
+launched from the source pane that are still running (one file per subagent under
+`$HERDR_ENGINEERING_STATE/subagents/<pane id>/`, entries older than six hours ignored)
+would die with the pane. Both panes are left alone and the handoff stays queued; wait
+for them or stop them and rerun, or pass `--allow-running-subagents` / `--keep-source`.
 
 `source_dirty` is the guard on the work rather than the successor: uncommitted
 tracked changes, or commits no remote branch has (`git status --porcelain`,
