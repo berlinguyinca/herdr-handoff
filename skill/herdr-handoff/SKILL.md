@@ -98,7 +98,10 @@ Both use the same `create` then `launch` path.
 
 `herdr-handoff takeover HANDOFF_ID` is that behaviour on its own, for a handoff
 that already exists: it splits inside the current pane's own tab, waits for the
-successor to prove itself, and closes the source pane. herdr observes the successor: the harness agent is detected in the child pane in a settled state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) on a line that is not the command the launcher typed, since the shell echoes that command back with the id in it. Until herdr observes that, the old pane stays
+successor to prove itself, and closes the source pane. herdr observes the successor: the harness
+agent is detected in the child pane in a settled state, and the handoff id is in the pane's output (the last
+200 rows of scrollback count) other than as an echo of the command the launcher typed, since the shell echoes
+that command back with the id in it. Until herdr observes that, the old pane stays
 open. `herdr-handoff confirm HANDOFF_ID` is an optional, idempotent record of the successor's own
 acknowledgement, not a condition. Never close a source pane by hand to skip that observation, and never use
 `--allow-dirty-source` to skip the worktree guard unless the user says the

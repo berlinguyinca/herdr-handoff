@@ -112,7 +112,7 @@ def test_the_document_spells_out_the_confirm_command_with_the_real_root(tmp_path
     package["handoff_id"] = ID
     document = store.write_document(package).read_text()
     assert f"herdr-handoff --root {tmp_path / 'handoffs'} confirm {ID}" in document
-    assert "stays open on purpose" in document
+    assert "optional acknowledgement" in document
 
 
 @pytest.mark.integration

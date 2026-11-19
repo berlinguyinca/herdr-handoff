@@ -71,3 +71,28 @@ def test_docs_state_proof_is_herdr_observation(relative):
     assert not re.search(r"(?i)successor (confirms itself|has run\s+`herdr-handoff confirm)", flat), relative
     assert not re.search(r"(?i)confirmation comes from the successor", flat), relative
     assert not re.search(r"(?i)closes? the (source|current) pane once .{0,80}\bhas run\b", flat), relative
+
+
+def test_generated_text_never_makes_confirm_the_condition_for_closing(tmp_path):
+    from conftest import HARNESSES
+    from herdr_handoff import (MAX_TYPED_COMMAND, HandoffStore, build_handoff, build_launch_plan, compact_prompt,
+                               takeover_prompt)
+    store = HandoffStore(tmp_path / "root")
+    package = build_handoff(goal="g")
+    document = store.write_document(package)
+    handoff_id = package["handoff_id"]
+    texts = {"document": document.read_text(encoding="utf-8"),
+             "takeover_prompt": takeover_prompt(handoff_id, document),
+             "takeover_prompt_root": takeover_prompt(handoff_id, document, root=tmp_path / "root"),
+             "compact_prompt": compact_prompt(handoff_id, confirm=True)}
+    for harness in HARNESSES:
+        plan = build_launch_plan("w1:p1", harness, handoff_id, str(tmp_path / "root" / "outbox" / "x.json"),
+                                 prompt=takeover_prompt(handoff_id, document), harness_binary=sys.executable,
+                                 fallback_prompt=compact_prompt(handoff_id, confirm=True))
+        assert len(plan["run_command"].encode()) <= MAX_TYPED_COMMAND, harness
+        texts[f"command:{harness}"] = plan["run_command"]
+    for name, text in texts.items():
+        flat = " ".join(text.split())
+        assert not re.search(r"(?i)can be closed|stays open on purpose|so the pane you replaced", flat), name
+        if "confirm" in flat:
+            assert "optional" in flat and "herdr observes" in flat, name

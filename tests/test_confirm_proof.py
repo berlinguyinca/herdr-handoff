@@ -25,7 +25,7 @@ def _harness(bindir: Path, body: str) -> None:
 
 
 SILENT = "print('pi-ready', flush=True)\ntime.sleep(300)\n"
-SPEAKS_THEN_SCROLLS = ("print(sys.argv[-1], flush=True)\n"
+SPEAKS_THEN_SCROLLS = ("print('resumed handoff', sys.argv[-1].split()[3], flush=True)\n"
                        "for n in range(80):\n    print('filler line', n, flush=True)\n"
                        "time.sleep(300)\n")
 
@@ -82,16 +82,36 @@ def test_the_echoed_launch_command_is_not_proof():
     assert id_outside_command(f"% {COMMAND}\n", ID, COMMAND) is None
 
 
-def test_a_launch_command_wrapped_over_rows_is_not_proof_wherever_the_id_breaks():
+def test_an_echo_with_a_prompt_redrawn_spacing_or_quoting_is_not_proof():
+    redrawn = COMMAND.replace(" ", "   ").replace("'", '"')
+    prompted = f"wohlgemuth@Gerts-MacBook-Pro ~ % {COMMAND}"
+    assert id_outside_command(redrawn, ID, COMMAND) is None
+    assert id_outside_command(prompted, ID, COMMAND) is None
+    assert id_outside_command(f"[main] {prompted} <-", ID, COMMAND) is None
+
+
+def test_a_wrapped_echo_is_not_proof_however_it_is_read_back():
+    # unwrapped it is one line; wrapped, each row alone holds only a piece of the command
     for width in range(20, 70, 7):
         rows = [("% " + COMMAND)[i:i + width] for i in range(0, len(COMMAND) + 2, width)]
         assert id_outside_command("\n".join(rows) + "\n", ID, COMMAND) is None, width
 
 
-def test_the_id_on_any_other_line_is_proof():
-    shown = f"% {COMMAND}\npi-ready\nResume HerdR handoff {ID}. First read /x\n"
+def test_a_line_that_quotes_the_command_and_adds_its_own_text_is_proof():
+    shown = f"% {COMMAND}\npi-ready\nresumed handoff {ID} and reading the document\n"
     assert ID in id_outside_command(shown, ID, COMMAND)
+    quoting = f"pi: given /bin/pi 'Resume HerdR handoff, resumed handoff {ID} now"
+    assert ID in id_outside_command(quoting, ID, COMMAND)
     assert id_outside_command("nothing here\n", ID, COMMAND) is None
+
+
+def test_a_bare_quote_of_the_prompt_is_not_enough():
+    assert id_outside_command(f"> Resume HerdR handoff {ID}.", ID, COMMAND) is None
+
+
+def test_confirm_successor_has_no_default_for_the_typed_command():
+    with pytest.raises(TypeError):
+        confirm_successor("w1:p1", harness="pi", handoff_id=ID, timeout=0)
 
 
 # --- against a real herdr server ----------------------------------------------------------------------
@@ -131,3 +151,38 @@ def test_confirm_successor_rejects_a_wrapped_echo_even_when_a_row_break_splits_t
         assert verdict["confirmed"] is False, (pad, verdict)
         return
     pytest.fail("no padding made the terminal wrap inside the handoff id; widen the search")
+
+
+ECHOER = ("import os\n"
+          "print('pi-ready', flush=True)\n"
+          "print(os.environ['VARIANT'], flush=True)\n"
+          "time.sleep(300)\n")
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("variant", ["spacing", "quoting", "prompt"])
+def test_an_echo_redrawn_by_something_else_is_not_proof(server_with, tmp_path, monkeypatch, variant):
+    # the "successor" prints a redrawn copy of the very command that started it
+    server = server_with(SILENT)
+    pane = _new_pane(server, tmp_path)
+    command = _type_launch(server, pane, tmp_path)
+    redrawn = {"spacing": command.replace(" ", "  "), "quoting": command.replace("'", '"'),
+               "prompt": "user@host ~ % " + command}[variant]
+    _harness(Path(server["probe"]), f"print('pi-ready', flush=True)\nprint({redrawn!r}, flush=True)\ntime.sleep(300)\n")
+    pane2 = _new_pane(server, tmp_path)
+    _type_launch(server, pane2, tmp_path)
+    verdict = confirm_successor(pane2, harness="pi", handoff_id=ID, timeout=5, typed_command=command)
+    assert verdict["confirmed"] is False, verdict
+
+
+@pytest.mark.integration
+def test_a_successor_line_quoting_the_command_with_its_own_text_is_proof(server_with, tmp_path):
+    server = server_with(SILENT)
+    pane = _new_pane(server, tmp_path)
+    command = _type_launch(server, pane, tmp_path)
+    _harness(Path(server["probe"]), "print(\"pi: given 'Resume HerdR handoff, resumed handoff\", sys.argv[-1].split()[3], "
+                                     "'now', flush=True)\ntime.sleep(300)\n")
+    pane2 = _new_pane(server, tmp_path)
+    _type_launch(server, pane2, tmp_path)
+    verdict = confirm_successor(pane2, harness="pi", handoff_id=ID, timeout=30, typed_command=command)
+    assert verdict["confirmed"] is True, verdict

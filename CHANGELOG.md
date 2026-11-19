@@ -3,11 +3,18 @@
 ## Unreleased (0.5.0)
 
 ### Changed
+- Handoffs are no longer stored under `.herdr/handoffs` in the current repo by default. With no `--root` they go
+  to one shared store (`HERDR_HANDOFF_STORE`, else `~/.local/share/herdr-handoff/store`), so a repo's earlier
+  handoffs are not found where they were written until they are imported: the first command in a repo copies
+  that repo's `.herdr/handoffs` records into the shared store, once, and says so on stderr. The old files are
+  never changed or deleted, and a copy edited there afterwards is not synced. `--root` restores the old
+  behaviour.
 - Proof of life is herdr's own observation, and the docs now say so: the successor's agent is detected in a
   settled state and the handoff id is in its output. `confirm` stays as an optional, idempotent record of the
   successor's own acknowledgement and is not a condition for closing the source. The id match is stricter and
   wider: after `wait-output`, the last 200 rows of `herdr pane read --source recent` are searched too, and an id
-  that appears only inside the typed launch command (echoed by the shell, wrapped or not) no longer counts.
+  that appears only as an echo of the typed launch command (behind a prompt, redrawn, or wrapped) no longer
+  counts; the successor's own words around the id do.
 - `takeover` and `launch` now split the successor pane **below** the source pane by default. Before, the split
   went to the right. This is intentional. Pass `takeover --direction right` for the old layout. The chosen
   direction is recorded in the takeover block as `direction`.

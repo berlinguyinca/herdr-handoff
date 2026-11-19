@@ -63,7 +63,9 @@ records it lacks into it (a message on stderr, nothing on stdout). A record alre
 wins, nothing in `.herdr/handoffs` is ever changed or deleted, and a corrupt legacy record is skipped and
 reported. `herdr-handoff store import-legacy [LEGACY_ROOT]` does the same on demand and prints
 `{"imported": [...], "skipped": [...]}`. Documents and the `confirm` command in them name the root that
-actually holds the record. Passing `--root` keeps the old behaviour exactly.
+actually holds the record. Passing `--root` keeps the old behaviour exactly. A legacy record is copied once:
+if it is changed in `.herdr/handoffs` after the import, the shared copy is not updated, and the shared copy
+wins. `HERDR_HANDOFF_STORE` may start with `~` or `~/`, expanded from `HOME`; `~user` is not expanded.
 
 Create a handoff:
 
@@ -149,8 +151,12 @@ So order a handoff this way, and nothing can be lost: make the work durable
 (commit, push, upload artifacts, file issues), create the handoff, launch the
 successor, confirm, close the source pane last.
 
-herdr observes the successor: the harness agent is detected in the child pane in a settled state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) on a line that is not the command the launcher typed, since the shell echoes that command back with the id in it. The close never waits for the successor to run anything. `herdr-handoff confirm HANDOFF_ID` stays
-as an optional, idempotent record of the successor's own acknowledgement (it stamps the successor's pane
+herdr observes the successor: the harness agent is detected in the child pane in a settled
+state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) other than as an echo
+of the command the launcher typed. The shell echoes that command back with the id in it, so an id whose
+surrounding text matches the typed command (behind a prompt, redrawn, or wrapped over rows) does not count, and
+neither does a bare quote of the prompt; the successor's own words around the id do. The close never waits for
+the successor to run anything. `herdr-handoff confirm HANDOFF_ID` stays as an optional, idempotent record of the successor's own acknowledgement (it stamps the successor's pane
 and `confirmed_at`). The handoff
 document spells the command out with the absolute root, and a pane started by a
 handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works

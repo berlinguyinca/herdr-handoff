@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
@@ -97,18 +99,47 @@ def _legacy_root(cwd=None):
     return os.path.join(base, ".herdr", "handoffs")
 
 
-def _import_legacy_quietly(store):
-    """Bring the current repo's old records into the shared store; report on stderr, never on stdout."""
+def _first_time(store, key):
+    """True the first time `key` is seen for this store; a marker file in the store remembers it.
+
+    A store that cannot hold the marker reports every time rather than never.
+    """
+    marker = store.root / ".notices" / hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()
+    if marker.exists():
+        return False
     try:
-        imported = store.import_legacy(_legacy_root())
+        marker.parent.mkdir(exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass
+    return True
+
+
+def _import_legacy_quietly(store):
+    """Bring the current repo's old records into the shared store; report on stderr, never on stdout.
+
+    The change of store is announced once per repo and each unreadable legacy record once, so a later
+    command in the same repo is silent.
+    """
+    legacy = Path(_legacy_root())
+    try:
+        imported = store.import_legacy(legacy)
     except OSError as exc:
         print(f"herdr-handoff: legacy import failed: {exc}", file=sys.stderr)
         return
+    outbox = legacy / "outbox"
+    if (imported or store.skipped_legacy or any(outbox.glob("handoff_*.json"))) \
+            and _first_time(store, f"legacy:{legacy.resolve()}"):
+        print(f"herdr-handoff: handoffs are now kept in one shared store, {store.root}; this repo's "
+              f".herdr/handoffs is only read once, to import its records.  Use --root to choose another store.",
+              file=sys.stderr)
     if imported:
         print(f"herdr-handoff: imported {len(imported)} record(s) from this repo's .herdr/handoffs: "
               + ", ".join(imported), file=sys.stderr)
     for name, reason in store.skipped_legacy:
-        print(f"herdr-handoff: skipped legacy record {name}: {reason}", file=sys.stderr)
+        stamp = (outbox / name).stat().st_mtime_ns if (outbox / name).exists() else 0
+        if _first_time(store, f"corrupt:{legacy.resolve()}:{name}:{stamp}"):
+            print(f"herdr-handoff: skipped legacy record {name}: {reason}", file=sys.stderr)
 
 
 def _harness_binary(harness):
@@ -271,35 +302,52 @@ def _read_recent(pane):
         return ""
 
 
-def id_outside_command(snapshot, handoff_id, typed_command):
-    """Text around `handoff_id` in `snapshot` once the typed launch command is removed, or None.
+_ECHO_CONTEXT = 12
+"""Characters around an id that must match the typed command for the id to count as that command's echo."""
 
-    The launcher typed `typed_command` into the pane, so the shell echoes the id back inside it, and that
-    echo is not the successor speaking.  Whitespace is dropped from both sides before the command is
-    cut out, so a command the terminal wrapped over several rows (or one behind a shell prompt) is
-    removed whole; what is left is output that did not come from the launcher.
+
+def id_outside_command(snapshot, handoff_id, typed_command):
+    """Text around an occurrence of `handoff_id` in `snapshot` that the typed launch command does not explain.
+
+    The launcher typed `typed_command` into the pane, so the shell echoes the id back inside it, and
+    that echo - behind a prompt, redrawn with other spacing or quoting, or wrapped over several rows - is
+    not the successor speaking.  Whitespace is dropped from both sides, so rows joined back together
+    compare as one line.  An occurrence is the echo when at least `_ECHO_CONTEXT` characters around it
+    match the same spot in the command; a successor's own words around the id do not.  Anything that
+    cannot be told apart is not proof, and so is a missing `typed_command`.
     """
+    if not typed_command or not handoff_id:
+        return None
     squeeze = lambda text: re.sub(r"\s+", "", text)  # noqa: E731
-    rest = squeeze(snapshot)
-    if typed_command:
-        rest = rest.replace(squeeze(typed_command), "")
-    at = rest.find(handoff_id)
-    return rest[max(0, at - 60):at + len(handoff_id) + 60] if at >= 0 else None
+    text, command, width = squeeze(snapshot), squeeze(typed_command), len(handoff_id)
+    anchors = [m.start() for m in re.finditer(re.escape(handoff_id), command)]
+
+    def shared_context(start, anchor):
+        left = right = 0
+        while left < min(start, anchor) and text[start - 1 - left] == command[anchor - 1 - left]:
+            left += 1
+        while start + width + right < len(text) and anchor + width + right < len(command) \
+                and text[start + width + right] == command[anchor + width + right]:
+            right += 1
+        return left + right
+
+    for found in re.finditer(re.escape(handoff_id), text):
+        if not any(shared_context(found.start(), anchor) >= _ECHO_CONTEXT for anchor in anchors):
+            return text[max(0, found.start() - 60):found.end() + 60]
+    return None
 
 
 def _successor_spoke(pane, handoff_id, typed_command):
     """Evidence that the id is in the pane's output other than in the command typed to start it, else None.
 
-    First what `wait-output` matches within its short window; when that is only the echoed command, or it
-    times out, the last `_CONFIRM_SCROLLBACK_LINES` rows of scrollback (a successor that printed the id
-    and then scrolled it off the screen has still printed it).
+    Read from the last `_CONFIRM_SCROLLBACK_LINES` rows of scrollback (a successor that printed the id and
+    then scrolled it off the screen has still printed it), never from one matched row: a row of a wrapped
+    echo has lost the context that shows it is an echo.
     """
-    matched = _wait_for_line(pane, handoff_id)
-    return (id_outside_command(matched, handoff_id, typed_command) if matched else None) \
-        or id_outside_command(_read_recent(pane), handoff_id, typed_command)
+    return id_outside_command(_read_recent(pane), handoff_id, typed_command)
 
 
-def confirm_successor(pane, *, harness, handoff_id, timeout, typed_command=None):
+def confirm_successor(pane, *, harness, handoff_id, timeout, typed_command):
     """Wait for herdr to observe the successor: its agent detected, and its pane producing output.
 
     The launcher is not allowed to believe its own optimism here - both facts are read back from herdr
@@ -788,7 +836,11 @@ def main(argv=None):
     if shared and args.command != "store":
         _import_legacy_quietly(store)
     if args.command == "store":
-        imported = store.import_legacy(args.legacy_root or _legacy_root())
+        try:
+            imported = store.import_legacy(args.legacy_root or _legacy_root())
+        except OSError as exc:
+            print(f"herdr-handoff: legacy import failed: {exc}", file=sys.stderr)
+            return 1
         out = {"imported": imported, "skipped": [{"file": n, "reason": r} for n, r in store.skipped_legacy]}
     elif args.command == "create":
         artifacts = [{"artifact_id": item} for item in args.artifact]

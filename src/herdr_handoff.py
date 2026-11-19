@@ -610,13 +610,13 @@ def compact_prompt(handoff_id, *, confirm=False):
             "environment variable in full, then continue from its Resume point. Its Constraints section is "
             "binding.")
     if confirm:
-        text += (f" When you have the Resume point, run `herdr-handoff confirm {handoff_id}` so the pane you "
-                 "replaced can be closed.")
+        text += (" Once herdr observes this pane running you, it closes the pane you replaced by itself; "
+                 f"`herdr-handoff confirm {handoff_id}` is an optional acknowledgement, safe to repeat.")
     return text
 
 
 def takeover_prompt(handoff_id, document, *, root=None):
-    """One-line prompt for a takeover: read the document, then confirm so the source pane can close.
+    """One-line prompt for a takeover: read the document, with `confirm` as an optional acknowledgement.
 
     With no ``root`` the confirm command carries no path at all, which is what the launched pane is
     told to run: every byte of a typed command counts against what herdr can deliver, and the pane can
@@ -624,8 +624,8 @@ def takeover_prompt(handoff_id, document, *, root=None):
     """
     command = (f"herdr-handoff --root {shlex.quote(str(root))} confirm {handoff_id}" if root
                else f"herdr-handoff confirm {handoff_id}")
-    return (f"{short_prompt(handoff_id, document)} When you have the Resume point, run "
-            f"`{command}` so the pane you replaced can be closed.")
+    return (f"{short_prompt(handoff_id, document)} Once herdr observes this pane running you, it closes the "
+            f"pane you replaced by itself; `{command}` is an optional acknowledgement, safe to repeat.")
 
 
 TAKEOVER_PHASES = frozenset({"launching", "launched", "confirmed", "source_closed", "unconfirmed",
@@ -881,13 +881,13 @@ def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confi
 def shared_store_root(env):
     """The one handoff store every repo shares: `HERDR_HANDOFF_STORE`, else under the user's home.
 
-    `~` comes from `env["HOME"]` when present, so a caller (or a test) can move the home without
-    touching the real one.
+    A leading `~` or `~/` comes from `env["HOME"]` when present, so a caller (or a test) can move the home
+    without touching the real one.  `~user` is not expanded; it stays a literal path.
     """
     configured = env.get("HERDR_HANDOFF_STORE")
     home = env.get("HOME") or os.path.expanduser("~")
     if configured:
-        return Path(home, configured[2:]) if configured.startswith("~/") else Path(configured)
+        return Path(home, configured[2:]) if configured == "~" or configured.startswith("~/") else Path(configured)
     return Path(home) / ".local" / "share" / "herdr-handoff" / "store"
 
 
@@ -983,10 +983,18 @@ class HandoffStore:
                 self.skipped_legacy.append((path.name, f"{type(exc).__name__}: {exc}"))
                 continue
             descriptor, temp = tempfile.mkstemp(dir=self.outbox, prefix=".import-", suffix=".tmp")
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(raw)
-            os.replace(temp, self.outbox / path.name)
-            imported.append(path.stem)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(raw)
+                os.link(temp, self.outbox / path.name)   # fails, never replaces, if a record appeared meanwhile
+                imported.append(path.stem)
+            except FileExistsError:
+                pass
+            finally:
+                try:
+                    os.unlink(temp)
+                except FileNotFoundError:
+                    pass
         return imported
 
     def link_successor(self, predecessor_id, successor_id):
@@ -1062,10 +1070,11 @@ class HandoffStore:
         ``HERDR_HANDOFF_FILE``), so the full command - the one that works from any shell, in any cwd -
         belongs here, in the document the successor has to read anyway.
         """
-        return ("\n## Releasing the pane this handoff replaces\n\n"
-                "Once you have the Resume point from this document, run:\n\n"
-                f"```sh\nherdr-handoff --root {shlex.quote(str(self.root.resolve()))} confirm {handoff_id}\n```\n\n"
-                "Until you do, the pane this handoff came from stays open on purpose.\n")
+        return ("\n## Acknowledging this handoff (optional)\n\n"
+                "herdr observes this pane itself and closes the pane this handoff replaced once it sees you "
+                "running.  Nothing waits on the command below; it is an optional acknowledgement and is safe "
+                "to run again:\n\n"
+                f"```sh\nherdr-handoff --root {shlex.quote(str(self.root.resolve()))} confirm {handoff_id}\n```\n")
 
     @staticmethod
     def _write(path, package):
