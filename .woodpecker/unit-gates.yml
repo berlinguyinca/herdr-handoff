@@ -11,7 +11,8 @@
 #
 #   * One pipeline instead of the structural/unit split.  herdr-engineering separates a ~1.5 s structural gate from a
 #     ~55 min unit gate so that `main` can be gated per push without spending ~78 runner-hours a day.  The whole
-#     herdr-handoff gate is about 30 s, so the split buys nothing and `main` gets the full suite on every push.
+#     herdr-handoff gate is about 25 s (measured: 207 tests in 24 s), so the split buys
+#     nothing and `main` gets the full suite on every push.
 #   * No include filter on the pull_request trigger, so the check reports on every pull request, documentation-only
 #     ones included.  That is what makes it safe to mark required in GitHub: a filtered check never reports on the
 #     PRs it filters out, and a required check that never reports parks the PR on "waiting for status to be

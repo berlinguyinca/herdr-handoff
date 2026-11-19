@@ -17,7 +17,8 @@ import pytest
 
 from conftest import pushed_repo, wait_for_json
 from herdr_handoff import (TAKEOVER_PHASES, HandoffStore, build_handoff, build_launch_plan,
-                           decide_takeover_close, short_prompt, takeover_prompt, validate_takeover,
+                           decide_takeover_close, short_prompt, takeover_prompt, validate_envelope,
+                           validate_takeover,
                            _handoff_root)
 
 ID = "handoff_" + "a" * 32
@@ -111,7 +112,7 @@ def test_the_document_spells_out_the_confirm_command_with_the_real_root(tmp_path
     package["handoff_id"] = ID
     document = store.write_document(package).read_text()
     assert f"herdr-handoff --root {tmp_path / 'handoffs'} confirm {ID}" in document
-    assert "stays open on purpose" in document
+    assert "optional acknowledgement" in document
 
 
 @pytest.mark.integration
@@ -176,7 +177,7 @@ def test_takeover_block_is_validated():
             validate_takeover(bad)
     assert validate_takeover(None) is None
     assert {"launching", "launched", "confirmed", "source_closed", "unconfirmed",
-            "launch_failed", "already_closed"} == TAKEOVER_PHASES
+            "launch_failed", "already_closed", "source_exit_failed"} == TAKEOVER_PHASES
 
 
 def test_launch_plan_can_be_built_for_a_takeover_without_changing_a_plain_launch():
@@ -449,3 +450,110 @@ def test_source_cwd_names_the_worktree_the_guard_inspects(live_herdr_server, tmp
     out = json.loads(done.stdout)
     assert out["status"] == "source_dirty" and out["worktree"]["tracked_changes"] == 1
     assert source in panes(herdr, full)
+
+
+# --- pane/session ids and the predecessor/successor link ---------------------------------------------
+
+# What `herdr agent get` answers for an agent that reports a session; both value shapes exist in herdr.
+AGENT_GET_WITH_ID_SESSION = ('{"id":"1","result":{"type":"agent_info","agent":{"agent":"pi","agent_status":"idle",'
+                             '"agent_session":{"kind":"id","value":"sess-123"}}}}')
+AGENT_GET_WITH_PATH_SESSION = ('{"id":"1","result":{"type":"agent_info","agent":{"agent":"pi","agent_status":"idle",'
+                               '"agent_session":{"kind":"path","value":"/home/u/.pi/sessions/s.jsonl"}}}}')
+AGENT_GET_WITHOUT_SESSION = '{"id":"1","result":{"type":"agent_info","agent":{"agent":"pi","agent_status":"idle"}}}'
+
+
+def test_agent_session_is_read_from_an_agent_get_reply_as_given():
+    from herdr_handoff_cli import agent_session_of
+    assert agent_session_of(json.loads(AGENT_GET_WITH_ID_SESSION)) == "sess-123"
+    assert agent_session_of(json.loads(AGENT_GET_WITH_PATH_SESSION)) == "/home/u/.pi/sessions/s.jsonl"
+    assert agent_session_of(json.loads(AGENT_GET_WITHOUT_SESSION)) is None
+    assert agent_session_of({}) is None
+
+
+def test_link_successor_sets_the_id_idempotently_and_ignores_a_foreign_predecessor(tmp_path):
+    store = HandoffStore(tmp_path / "root")
+    first = store.enqueue(build_handoff(goal="Goal", remaining=["r"]))
+    successor = "handoff_" + "b" * 32
+    store.link_successor(first["handoff_id"], successor)
+    store.link_successor(first["handoff_id"], successor)
+    assert store.get(first["handoff_id"])["successor_id"] == successor
+    validate_envelope(store.get(first["handoff_id"]))
+    before = sorted(p.name for p in store.outbox.iterdir())
+    store.link_successor("handoff_" + "c" * 32, successor)      # recorded in another repo's store: no-op
+    assert sorted(p.name for p in store.outbox.iterdir()) == before
+
+
+def test_create_with_a_predecessor_links_the_predecessor_record(tmp_path):
+    root = tmp_path / "root"
+    first = create(root)
+    done = run_cli(["--root", str(root), "create", "--goal", "Next", "--source-harness", "pi",
+                    "--predecessor-id", first["handoff_id"], "--source-pane", "w1:p2"])
+    assert done.returncode == 0, done.stderr
+    second = json.loads(done.stdout)
+    assert second["predecessor_id"] == first["handoff_id"] and second["source"]["pane_id"] == "w1:p2"
+    assert source_state(root, first["handoff_id"])["successor_id"] == second["handoff_id"]
+
+
+@pytest.mark.integration
+def test_takeover_fills_pane_and_session_ids(live_herdr_server, tmp_path):
+    # The recorder harnesses are not real agents, so herdr reports no agent_session for them and the
+    # session id stays unset; the child pane id is herdr's own and is recorded.
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(tmp_path)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(["--root", str(root), "takeover", package["handoff_id"], "--parent-pane", source,
+                    "--cwd", str(tmp_path), "--confirm-timeout", "30"], env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    out = json.loads(done.stdout)
+    target = source_state(root, package["handoff_id"])["target"]
+    assert target["pane_id"] == out["pane_id"] != source
+    assert target.get("session_id") is None
+
+
+# --- placement: the successor goes below the source by default ---------------------------------------
+
+def test_launch_plan_splits_down_by_default():
+    plan = build_launch_plan("w1:p1", "pi", ID, "/abs/outbox/x.json")
+    assert plan["split"][:6] == ["herdr", "pane", "split", "w1:p1", "--direction", "down"]
+    assert "--focus" in plan["split"]
+
+
+def test_direction_right_still_available():
+    plan = build_launch_plan("w1:p1", "pi", ID, "/abs/outbox/x.json", direction="right")
+    assert plan["split"][4:6] == ["--direction", "right"]
+
+
+def test_invalid_direction_rejected():
+    with pytest.raises(ValueError, match="direction"):
+        build_launch_plan("w1:p1", "pi", ID, "/abs/outbox/x.json", direction="left")
+    with pytest.raises(ValueError, match="direction"):
+        validate_takeover({"version": 1, "phase": "launching", "direction": "up"})
+
+
+def test_takeover_block_records_direction():
+    assert validate_takeover({"version": 1, "phase": "launching", "direction": "down"})["direction"] == "down"
+    assert validate_takeover({"version": 1, "phase": "launching", "direction": "right"})["direction"] == "right"
+
+
+@pytest.mark.integration
+def test_takeover_splits_below_by_default_and_leaves_it_out_of_the_record(live_herdr_server, tmp_path):
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(tmp_path)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(["--root", str(root), "takeover", package["handoff_id"], "--parent-pane", source,
+                    "--cwd", str(tmp_path), "--keep-source", "--confirm-timeout", "30"],
+                   env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "direction" not in source_state(root, package["handoff_id"])["takeover"]   # the default is not written
+    shown = {p["pane_id"]: p for p in json.loads(subprocess.run(
+        [herdr, "pane", "list"], env=full, capture_output=True, text=True).stdout)["result"]["panes"]}
+    child = json.loads(done.stdout)["pane_id"]
+    assert shown[child].get("tab_id") == shown[source].get("tab_id")
