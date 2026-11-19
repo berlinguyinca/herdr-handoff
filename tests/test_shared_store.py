@@ -185,8 +185,9 @@ else:
 
 def test_an_import_never_overwrites_a_record_updated_in_the_shared_store_meanwhile(tmp_path):
     legacy = tmp_path / "legacy"
+    legacy_store = HandoffStore(legacy)           # the records are the same ones `create` writes, without 250 processes
     for n in range(250):
-        make(legacy, f"legacy {n}")
+        legacy_store.enqueue(build_handoff(goal=f"legacy {n}"))
     script = tmp_path / "race.py"
     script.write_text(RACE.format(src=SRC))
     shared = tmp_path / "shared"
@@ -234,3 +235,25 @@ def test_store_import_legacy_reports_an_os_error_cleanly(world, tmp_path):
     finally:
         (world["store"] / "outbox").chmod(0o755)
     assert done.returncode == 1 and "Traceback" not in done.stderr and "legacy import failed" in done.stderr
+
+
+def test_exclusive_create_writes_a_new_record_and_never_replaces_one(tmp_path):
+    destination = tmp_path / "handoff_x.json"
+    assert HandoffStore._create_exclusive(b'{"a": 1}', destination) is True
+    assert destination.read_bytes() == b'{"a": 1}' and destination.stat().st_mode & 0o777 == 0o600
+    assert HandoffStore._create_exclusive(b'{"a": 2}', destination) is False
+    assert destination.read_bytes() == b'{"a": 1}'
+
+
+def test_a_record_that_cannot_be_written_is_reported_as_failed_not_skipped(tmp_path):
+    legacy, shared = tmp_path / "legacy", HandoffStore(tmp_path / "shared")
+    make(legacy, "wanted")
+    shared.outbox.chmod(0o500)                  # a real unwritable store, not a stand-in
+    try:
+        if os.access(shared.outbox, os.W_OK):
+            pytest.skip("this user can write anywhere (root)")
+        assert shared.import_legacy(legacy) == []
+    finally:
+        shared.outbox.chmod(0o700)
+    assert len(shared.failed_legacy) == 1 and shared.skipped_legacy == []
+    assert len(shared.import_legacy(legacy)) == 1       # the next command tries it again

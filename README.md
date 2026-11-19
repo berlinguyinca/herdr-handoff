@@ -89,7 +89,8 @@ JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
 ```sh
 herdr-handoff takeover HANDOFF_ID [--parent-pane PANE] [--cwd DIR] \
-  [--confirm-timeout 25] [--keep-source] [--direction down|right] [--source-cwd DIR] [--allow-dirty-source] [--allow-running-subagents] \
+  [--confirm-timeout 25] [--keep-source] [--direction down|right] [--source-cwd DIR] \
+  [--allow-dirty-source] [--allow-running-subagents] \
   [--source-exit-text TEXT] [--source-exit-key KEY ...] [--source-exit-timeout 30]
 ```
 
@@ -163,15 +164,17 @@ directory is not a git repository), so the successor knows what exists only loca
 
 So order a handoff this way, and nothing can be lost: make the work durable
 (commit, push, upload artifacts, file issues), create the handoff, launch the
-successor, confirm, close the source pane last.
+successor with `takeover`, which closes the source pane last, once herdr observes the successor (`confirm` is
+an optional acknowledgement, not a step the close waits for).
 
 herdr observes the successor: the harness agent is detected in the child pane in a settled
-state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) other than as an echo
-of the command the launcher typed. The shell echoes that command back with the id in it, so an id whose
-surrounding text matches the typed command (behind a prompt, redrawn, wrapped over rows, or boxed with a border on every row) does not count; the
-comparison uses letters and digits only. Neither does a bare id alone or a bare quote of the prompt; the successor's own words around the id do. The close never waits for
-the successor to run anything. `herdr-handoff confirm HANDOFF_ID` stays as an optional, idempotent record of the successor's own acknowledgement (it stamps the successor's pane
-and `confirmed_at`). The handoff
+state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) other than as an
+echo of the command the launcher typed. The shell echoes that command back with the id in it, so an id whose
+surrounding text matches the typed command (behind a prompt, redrawn, wrapped over rows, or boxed with a
+border on every row) does not count; the comparison uses letters and digits only. Neither does a bare id
+alone or a bare quote of the prompt; the successor's own words around the id do. The close never waits for
+the successor to run anything. `herdr-handoff confirm HANDOFF_ID` stays as an optional, idempotent record of
+the successor's own acknowledgement (it stamps the successor's pane and `confirmed_at`). The handoff
 document spells the command out with the absolute root, and a pane started by a
 handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works
 there. Every step is recorded in the package's `takeover` block (`launching` →

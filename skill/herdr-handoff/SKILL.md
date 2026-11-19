@@ -30,8 +30,9 @@ successor.
   command to start the target harness (status `manual_launch_required`);
   `herdr-handoff resume <id>` works either way.
 - Order the steps so nothing can be lost: make the work durable (commit, push,
-  upload artifacts, file issues), create the handoff, launch the successor,
-  confirm, close the source pane. Once a pane is closed its session cannot be
+  upload artifacts, file issues), create the handoff, launch the successor with `takeover`, which closes
+  the source pane last, once herdr observes the successor (`confirm` is optional). Once a pane
+  is closed its session cannot be
   recovered, so the close always comes last and always needs proof.
 - A close also needs the source *worktree* to hold nothing that exists only
   there. `takeover` refuses uncommitted tracked changes and commits no remote
@@ -45,7 +46,8 @@ successor.
   `--source-exit-text TEXT` and/or `--source-exit-key KEY` (repeatable, e.g. `Enter`)
   with `--source-exit-timeout SECONDS` (default 30). If the harness is still running
   afterwards (or the shell still has any child process, such as a suspended or backgrounded
-  harness, or the pane holds a non-agent program, which gets nothing typed) the status is `source_exit_failed`: both panes stay, and a rerun reuses
+  harness, or the pane holds a non-agent program, which gets nothing typed) the status is
+  `source_exit_failed`: both panes stay, and a rerun reuses
   the successor.
 
 - `memory_context` holds memory ids/revisions only. Treat anything resolved
@@ -106,9 +108,9 @@ successor to prove itself, and closes the source pane. herdr observes the succes
 agent is detected in the child pane in a settled state, and the handoff id is in the pane's output (the last
 200 rows of scrollback count) other than as an echo of the command the launcher typed, since the shell echoes
 that command back with the id in it (compared by letters and digits only, so wrapping and borders do not
-matter; a bare id alone is not proof, the successor must say something around it). Until herdr observes that, the old pane stays
-open. `herdr-handoff confirm HANDOFF_ID` is an optional, idempotent record of the successor's own
-acknowledgement, not a condition. Never close a source pane by hand to skip that observation, and never use
+matter; a bare id alone is not proof, the successor must say something around it). Until herdr observes
+that, the old pane stays open. `herdr-handoff confirm HANDOFF_ID` is an optional, idempotent record of
+the successor's own acknowledgement, not a condition. Never close a source pane by hand to skip that observation, and never use
 `--allow-dirty-source` to skip the worktree guard unless the user says the
 uncommitted or unpushed work may be left behind. `--source-cwd DIR` names the
 worktree to check when the pane sits somewhere other than the work it produced.

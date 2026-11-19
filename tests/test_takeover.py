@@ -540,7 +540,7 @@ def test_takeover_block_records_direction():
 
 
 @pytest.mark.integration
-def test_takeover_splits_below_by_default_and_records_it(live_herdr_server, tmp_path):
+def test_takeover_splits_below_by_default_and_leaves_it_out_of_the_record(live_herdr_server, tmp_path):
     env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
     full = {**os.environ, **env}
     ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(tmp_path)], env=full,
@@ -552,7 +552,7 @@ def test_takeover_splits_below_by_default_and_records_it(live_herdr_server, tmp_
                     "--cwd", str(tmp_path), "--keep-source", "--confirm-timeout", "30"],
                    env={**env, "HERDR_PANE_ID": source})
     assert done.returncode == 0, done.stdout + done.stderr
-    assert source_state(root, package["handoff_id"])["takeover"]["direction"] == "down"
+    assert "direction" not in source_state(root, package["handoff_id"])["takeover"]   # the default is not written
     shown = {p["pane_id"]: p for p in json.loads(subprocess.run(
         [herdr, "pane", "list"], env=full, capture_output=True, text=True).stdout)["result"]["panes"]}
     child = json.loads(done.stdout)["pane_id"]

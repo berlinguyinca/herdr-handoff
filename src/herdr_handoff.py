@@ -618,8 +618,8 @@ def compact_prompt(handoff_id, *, confirm=False):
             "environment variable in full, then continue from its Resume point. Its Constraints section is "
             "binding.")
     if confirm:
-        text += (" Once herdr observes this pane running you, it closes the pane you replaced by itself; "
-                 f"`herdr-handoff confirm {handoff_id}` is an optional acknowledgement, safe to repeat.")
+        text += (" Once herdr observes this pane running you, its takeover closes the pane you replaced, unless the "
+                 f"close is refused; `herdr-handoff confirm {handoff_id}` is an optional acknowledgement, safe to repeat.")
     return text
 
 
@@ -632,8 +632,9 @@ def takeover_prompt(handoff_id, document, *, root=None):
     """
     command = (f"herdr-handoff --root {shlex.quote(str(root))} confirm {handoff_id}" if root
                else f"herdr-handoff confirm {handoff_id}")
-    return (f"{short_prompt(handoff_id, document)} Once herdr observes this pane running you, it closes the "
-            f"pane you replaced by itself; `{command}` is an optional acknowledgement, safe to repeat.")
+    return (f"{short_prompt(handoff_id, document)} Once herdr observes this pane running you, its takeover closes "
+            f"the pane you replaced, unless the close is refused; `{command}` is an optional acknowledgement, "
+            "safe to repeat.")
 
 
 TAKEOVER_PHASES = frozenset({"launching", "launched", "confirmed", "source_closed", "unconfirmed",
@@ -913,6 +914,7 @@ class HandoffStore:
     def __init__(self, root):
         self.root = Path(root).expanduser()
         self.skipped_legacy = []
+        self.failed_legacy = []
         self.outbox = self.root / "outbox"
         self.outbox.mkdir(parents=True, exist_ok=True)
 
@@ -1030,9 +1032,11 @@ class HandoffStore:
 
         A record already here wins and is never touched, so an import is idempotent and cannot duplicate.
         The legacy store is only read.  A record that is not valid JSON, or whose id is not its file name,
-        is skipped and listed in `self.skipped_legacy` as `(file name, reason)`.
+        is skipped and listed in `self.skipped_legacy` as `(file name, reason)`; one that could not be
+        written here is listed in `self.failed_legacy` the same way, so a later command tries it again.
         """
         self.skipped_legacy = []
+        self.failed_legacy = []
         source = Path(legacy_root).expanduser() / "outbox"
         if not source.is_dir() or source.resolve() == self.outbox.resolve():
             return []
@@ -1049,20 +1053,50 @@ class HandoffStore:
             except (OSError, ValueError) as exc:
                 self.skipped_legacy.append((path.name, f"{type(exc).__name__}: {exc}"))
                 continue
-            descriptor, temp = tempfile.mkstemp(dir=self.outbox, prefix=".import-", suffix=".tmp")
             try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(raw)
-                os.link(temp, self.outbox / path.name)   # fails, never replaces, if a record appeared meanwhile
-                imported.append(path.stem)
-            except FileExistsError:
-                pass
-            finally:
-                try:
-                    os.unlink(temp)
-                except FileNotFoundError:
-                    pass
+                if self._import_one(raw, self.outbox / path.name):
+                    imported.append(path.stem)
+            except OSError as exc:
+                self.failed_legacy.append((path.name, f"{type(exc).__name__}: {exc}"))
         return imported
+
+    def _import_one(self, raw, destination):
+        """Put `raw` at `destination` whole or not at all, never replacing a record; False if one is there.
+
+        The bytes go to a temp file that is linked into place, so a reader never sees half a record.  A
+        filesystem without hard links gets an exclusive create of the destination instead.
+        """
+        descriptor, temp = tempfile.mkstemp(dir=self.outbox, prefix=".import-", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+            try:
+                os.link(temp, destination)               # fails, never replaces, if a record appeared meanwhile
+            except FileExistsError:
+                return False
+            except OSError:                              # no hard links here (FAT, some network mounts)
+                return self._create_exclusive(raw, destination)
+            return True
+        finally:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _create_exclusive(raw, destination):
+        """Write `raw` to a new `destination`; False, and nothing touched, if it already exists."""
+        try:
+            fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+        except OSError:
+            os.unlink(destination)                       # never leave a half-written record behind
+            raise
+        return True
 
     def link_successor(self, predecessor_id, successor_id):
         """Record on the predecessor that `successor_id` continues it; return a warning if that cannot be done.

@@ -22,11 +22,23 @@
   settled state and the handoff id is in its output. `confirm` stays as an optional, idempotent record of the
   successor's own acknowledgement and is not a condition for closing the source. The id match is stricter and
   wider: after `wait-output`, the last 200 rows of `herdr pane read --source recent` are searched too, and an id
-  that appears only as an echo of the typed launch command (behind a prompt, redrawn, wrapped, or boxed with a border on every row) no longer
-  counts, the comparison being on letters and digits only; a bare id alone is not proof; the successor's own words around the id do.
+  that appears only as an echo of the typed launch command (behind a prompt, redrawn, wrapped, or boxed with
+  a border on every row) no longer counts, the comparison being on letters and digits only; a bare id alone
+  is not proof; the successor's own words around the id do.
 - `takeover` and `launch` now split the successor pane **below** the source pane by default. Before, the split
-  went to the right. This is intentional. Pass `takeover --direction right` for the old layout. The chosen
-  direction is recorded in the takeover block as `direction`.
+  went to the right. This is intentional. Pass `takeover --direction right` for the old layout. A direction
+  other than the default is recorded in the takeover block as `direction`; the default is left out.
+- Successor prompts say that herdr's takeover closes the replaced pane once herdr observes the successor running,
+  unless the close is refused, rather than that the pane closes "by itself".
+- A legacy record on a filesystem without hard links is imported by an exclusive create; a record that cannot be
+  written is reported on every command (and not marked as reported) until it can.
+
+### Compatibility
+- A 0.4.0 binary rejects records that carry the new takeover phases or keys: upgrade all hosts that share a store
+  together.
+- `list` now spans every repo in the shared store (`~/.local/share/herdr-handoff/store`), not just the current one.
+- A script that reads `.herdr/handoffs/outbox/<id>.json` must pass `--root` or read the shared store instead.
+- A record is copied once on import; a record updated in either place afterwards is not synced back.
 
 ### Added
 - `create --fallback` records `provenance.fallback: true` (optional boolean in the schema and validator; shown in

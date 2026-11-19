@@ -16,10 +16,11 @@ import sys
 import time
 from pathlib import Path
 
-from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, TakeoverInProgress, __version__, build_handoff, build_launch_plan, build_memory_context,
-                            compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
-                            running_subagents, shared_store_root, short_prompt, source_worktree_state, takeover_prompt, unpushed_commits,
-                            worktree_close_refusal, validate_takeover, _handoff_root)
+from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, TakeoverInProgress, __version__,
+                            build_handoff, build_launch_plan, build_memory_context, compact_prompt,
+                            decide_takeover_close, resolve_memory_refs, resume_prompt, running_subagents,
+                            shared_store_root, short_prompt, source_worktree_state, takeover_prompt,
+                            unpushed_commits, worktree_close_refusal, validate_takeover, _handoff_root)
 
 
 def _run(argv, *, capture=True):
@@ -129,7 +130,9 @@ def _import_legacy_quietly(store):
         print(f"herdr-handoff: legacy import failed: {exc}", file=sys.stderr)
         return
     outbox = legacy / "outbox"
-    if (imported or store.skipped_legacy or any(outbox.glob("handoff_*.json"))) \
+    for name, reason in store.failed_legacy:             # reported every time, and no marker: it is retried
+        print(f"herdr-handoff: legacy import failed: {name}: {reason}", file=sys.stderr)
+    if (imported or store.skipped_legacy or any(outbox.glob("handoff_*.json"))) and not store.failed_legacy \
             and _first_time(store, f"legacy:{legacy.resolve()}"):
         print(f"herdr-handoff: handoffs are now kept in one shared store, {store.root}; this repo's "
               f".herdr/handoffs is only read once, to import its records.  Use --root to choose another store.",
@@ -652,8 +655,10 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
                     "source_pane": source_pane, "placement": placement, "document": document,
                     "source_closed": False, "idempotent": True}
     else:
-        store.record_takeover(handoff_id, {"phase": "launching", "source_pane": source_pane, "reason": None,
-                                           "direction": direction})
+        launching = {"phase": "launching", "source_pane": source_pane, "reason": None}
+        if direction != "down":                 # the default stays out of the record, which older readers know
+            launching["direction"] = direction
+        store.record_takeover(handoff_id, launching)
         try:
             pane, result, placement = _place(plan, source_pane, cwd, label)
         except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError) as exc:
@@ -917,6 +922,10 @@ def main(argv=None):
             imported = store.import_legacy(args.legacy_root or _legacy_root())
         except OSError as exc:
             print(f"herdr-handoff: legacy import failed: {exc}", file=sys.stderr)
+            return 1
+        if store.failed_legacy:
+            for name, reason in store.failed_legacy:
+                print(f"herdr-handoff: legacy import failed: {name}: {reason}", file=sys.stderr)
             return 1
         out = {"imported": imported, "skipped": [{"file": n, "reason": r} for n, r in store.skipped_legacy]}
     elif args.command == "create":
