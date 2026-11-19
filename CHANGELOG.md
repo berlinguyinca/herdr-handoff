@@ -22,8 +22,8 @@
   settled state and the handoff id is in its output. `confirm` stays as an optional, idempotent record of the
   successor's own acknowledgement and is not a condition for closing the source. The id match is stricter and
   wider: after `wait-output`, the last 200 rows of `herdr pane read --source recent` are searched too, and an id
-  that appears only as an echo of the typed launch command (behind a prompt, redrawn, or wrapped) no longer
-  counts; the successor's own words around the id do.
+  that appears only as an echo of the typed launch command (behind a prompt, redrawn, wrapped, or boxed with a border on every row) no longer
+  counts, the comparison being on letters and digits only; a bare id alone is not proof; the successor's own words around the id do.
 - `takeover` and `launch` now split the successor pane **below** the source pane by default. Before, the split
   went to the right. This is intentional. Pass `takeover --direction right` for the old layout. The chosen
   direction is recorded in the takeover block as `direction`.

@@ -304,37 +304,47 @@ def _read_recent(pane):
         return ""
 
 
-_ECHO_CONTEXT = 12
-"""Characters around an id that must match the typed command for the id to count as that command's echo."""
+_OWN_WORDS = 8
+"""Letters and digits beside the id that are not the typed command, for them to count as the successor's own."""
 
 
 def id_outside_command(snapshot, handoff_id, typed_command):
-    """Text around an occurrence of `handoff_id` in `snapshot` that the typed launch command does not explain.
+    """Text around an occurrence of `handoff_id` in `snapshot` that is the successor's, not the launch echo.
 
     The launcher typed `typed_command` into the pane, so the shell echoes the id back inside it, and
-    that echo - behind a prompt, redrawn with other spacing or quoting, or wrapped over several rows - is
-    not the successor speaking.  Whitespace is dropped from both sides, so rows joined back together
-    compare as one line.  An occurrence is the echo when at least `_ECHO_CONTEXT` characters around it
-    match the same spot in the command; a successor's own words around the id do not.  Anything that
-    cannot be told apart is not proof, and so is a missing `typed_command`.
+    that echo is not the successor speaking: behind a prompt, redrawn with other spacing or quoting,
+    wrapped over rows, inside a box whose border is drawn on every row.  So both sides are reduced to
+    ASCII letters and digits (rows joined), which drops all of that.  An occurrence of the id is the echo
+    when, going outward from it, the text matches the command until the command itself ends; it is proof
+    only when no spot of the command explains it, and at least `_OWN_WORDS` letters or digits next to it
+    stop matching before the command's edge and are not a piece of the command either.  A bare id has
+    none, and anything undecidable is not proof, as is a missing `typed_command`.  The text returned is the
+    reduced one around the id (underscores and punctuation are gone from it).
     """
     if not typed_command or not handoff_id:
         return None
-    squeeze = lambda text: re.sub(r"\s+", "", text)  # noqa: E731
-    text, command, width = squeeze(snapshot), squeeze(typed_command), len(handoff_id)
-    anchors = [m.start() for m in re.finditer(re.escape(handoff_id), command)]
+    reduce = lambda text: re.sub(r"[^A-Za-z0-9]", "", text)  # noqa: E731
+    text, command, target = reduce(snapshot), reduce(typed_command), reduce(handoff_id)
+    if not target:
+        return None
+    width = len(target)
+    anchors = [m.start() for m in re.finditer(re.escape(target), command)]
 
-    def shared_context(start, anchor):
-        left = right = 0
+    def own_words(start, anchor):
+        left = 0
         while left < min(start, anchor) and text[start - 1 - left] == command[anchor - 1 - left]:
             left += 1
+        right = 0
         while start + width + right < len(text) and anchor + width + right < len(command) \
                 and text[start + width + right] == command[anchor + width + right]:
             right += 1
-        return left + right
+        before = text[start - left - _OWN_WORDS:start - left] if left < anchor and start - left >= _OWN_WORDS else ""
+        end = start + width + right
+        after = text[end:end + _OWN_WORDS] if anchor + width + right < len(command) else ""
+        return any(len(side) == _OWN_WORDS and side not in command for side in (before, after))
 
-    for found in re.finditer(re.escape(handoff_id), text):
-        if not any(shared_context(found.start(), anchor) >= _ECHO_CONTEXT for anchor in anchors):
+    for found in re.finditer(re.escape(target), text):
+        if not any(not own_words(found.start(), anchor) for anchor in anchors):
             return text[max(0, found.start() - 60):found.end() + 60]
     return None
 

@@ -99,14 +99,44 @@ def test_a_wrapped_echo_is_not_proof_however_it_is_read_back():
 
 def test_a_line_that_quotes_the_command_and_adds_its_own_text_is_proof():
     shown = f"% {COMMAND}\npi-ready\nresumed handoff {ID} and reading the document\n"
-    assert ID in id_outside_command(shown, ID, COMMAND)
+    assert ID.replace("_", "") in id_outside_command(shown, ID, COMMAND)
     quoting = f"pi: given /bin/pi 'Resume HerdR handoff, resumed handoff {ID} now"
-    assert ID in id_outside_command(quoting, ID, COMMAND)
+    assert ID.replace("_", "") in id_outside_command(quoting, ID, COMMAND)
     assert id_outside_command("nothing here\n", ID, COMMAND) is None
 
 
 def test_a_bare_quote_of_the_prompt_is_not_enough():
     assert id_outside_command(f"> Resume HerdR handoff {ID}.", ID, COMMAND) is None
+
+
+def _bordered(text, width, border):
+    """`text` wrapped to `width` columns the way a boxed input field shows it: a border on every row."""
+    return "\n".join(f"{border} {text[i:i + width]:<{width}} {border}" for i in range(0, len(text), width)) + "\n"
+
+
+def test_a_bordered_echo_in_a_narrow_pane_is_not_proof_even_with_the_id_alone_on_a_row():
+    # boxes, corners and other drawing characters between rows are not part of what was typed
+    for border in ("┃", "│", "|", "║"):
+        for width in range(40, 52):
+            for lead in range(0, 24):                      # slide the wrap so the id lands on a row of its own
+                shown = _bordered(" " * lead + COMMAND, width, border)
+                assert id_outside_command(shown, ID, COMMAND) is None, (border, width, lead)
+
+
+def test_an_echo_read_while_it_is_still_being_typed_is_not_proof():
+    # herdr types the command into the pane in pieces, so a read can land anywhere inside the echo
+    for cut in range(len(COMMAND) + 1):
+        for lead in ("% ", "wohlgemuth@Gerts-MacBook-Pro ~ % "):
+            assert id_outside_command(lead + COMMAND[:cut], ID, COMMAND) is None, (cut, lead)
+    for cut in range(len(COMMAND) + 1):                        # and with the rows wrapped at 47 columns
+        rows = [COMMAND[:cut][i:i + 47] for i in range(0, cut, 47)]
+        assert id_outside_command("\n".join(rows), ID, COMMAND) is None, cut
+
+
+def test_a_bare_id_is_not_proof_but_the_ids_own_surroundings_are():
+    assert id_outside_command(ID, ID, COMMAND) is None
+    assert id_outside_command(f"\n{ID}\n", ID, COMMAND) is None
+    assert id_outside_command(f"pi started\nnow working on {ID} for you", ID, COMMAND) is not None
 
 
 def test_confirm_successor_has_no_default_for_the_typed_command():
@@ -123,7 +153,7 @@ def test_confirm_successor_accepts_id_seen_in_recent_scrollback(server_with, tmp
     command = _type_launch(server, pane, tmp_path)
     verdict = confirm_successor(pane, harness="pi", handoff_id=ID, timeout=30, typed_command=command)
     assert verdict["confirmed"] is True, verdict
-    assert verdict["evidence"]["agent"] == "pi" and ID in verdict["evidence"]["matched_line"]
+    assert verdict["evidence"]["agent"] == "pi" and ID.replace("_", "") in verdict["evidence"]["matched_line"]
     assert ID not in _read(server, pane, "visible")      # the screen has scrolled past it; the scrollback has not
 
 
@@ -133,9 +163,10 @@ def test_confirm_successor_rejects_id_only_in_the_typed_command_echo(server_with
     pane = _new_pane(server, tmp_path)
     command = _type_launch(server, pane, tmp_path)
     verdict = confirm_successor(pane, harness="pi", handoff_id=ID, timeout=6, typed_command=command)
-    assert verdict["confirmed"] is False, verdict
-    assert verdict["evidence"]["agent"] == "pi" and verdict["evidence"]["matched_line"] is None
-    assert ID in _read(server, pane, "recent")           # the echo really is on the screen, and it is ignored
+    screen = _read(server, pane, "recent")
+    assert verdict["confirmed"] is False, (verdict, screen)       # the screen says what was taken for proof
+    assert verdict["evidence"]["agent"] == "pi" and verdict["evidence"]["matched_line"] is None, (verdict, screen)
+    assert ID in screen           # the echo really is on the screen, and it is ignored
 
 
 @pytest.mark.integration

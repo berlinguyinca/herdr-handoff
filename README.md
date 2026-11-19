@@ -168,8 +168,8 @@ successor, confirm, close the source pane last.
 herdr observes the successor: the harness agent is detected in the child pane in a settled
 state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) other than as an echo
 of the command the launcher typed. The shell echoes that command back with the id in it, so an id whose
-surrounding text matches the typed command (behind a prompt, redrawn, or wrapped over rows) does not count, and
-neither does a bare quote of the prompt; the successor's own words around the id do. The close never waits for
+surrounding text matches the typed command (behind a prompt, redrawn, wrapped over rows, or boxed with a border on every row) does not count; the
+comparison uses letters and digits only. Neither does a bare id alone or a bare quote of the prompt; the successor's own words around the id do. The close never waits for
 the successor to run anything. `herdr-handoff confirm HANDOFF_ID` stays as an optional, idempotent record of the successor's own acknowledgement (it stamps the successor's pane
 and `confirmed_at`). The handoff
 document spells the command out with the absolute root, and a pane started by a
