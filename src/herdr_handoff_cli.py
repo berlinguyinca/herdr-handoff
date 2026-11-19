@@ -209,6 +209,21 @@ def _agent_state(pane, *, wait_ms=None):
     return agent.get("agent"), agent.get("agent_status")
 
 
+def agent_session_of(reply):
+    """The harness session id in an `herdr agent get` reply, as herdr gave it (an id, or a session path)."""
+    agent = (reply.get("result") or {}).get("agent")
+    session = agent.get("agent_session") if isinstance(agent, dict) else None
+    value = session.get("value") if isinstance(session, dict) else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _agent_session(pane):
+    try:
+        return agent_session_of(_herdr_json(["herdr", "agent", "get", pane]))
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return None
+
+
 def _wait_for_line(pane, text):
     """A pane line herdr matched, or None within the short window."""
     try:
@@ -377,7 +392,8 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                                                      "evidence": evidence})["takeover"]
         return report("launch_unconfirmed", block=refused, source_closed=False,
                       reason=f"unconfirmed: {detail}", evidence=evidence)
-    block = store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "evidence": evidence})["takeover"]
+    block = store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "evidence": evidence},
+                                  target_ids={"pane_id": pane, "session_id": _agent_session(pane)})["takeover"]
     if keep_source:
         return report("confirmed", block=block, source_closed=False)
 
@@ -579,6 +595,8 @@ def main(argv=None):
         except ValueError as exc:
             raise SystemExit(f"herdr-handoff: invalid handoff: {exc}")
         out = store.enqueue(package)
+        if args.predecessor_id:
+            store.link_successor(args.predecessor_id, out["handoff_id"])
     elif args.command == "inspect":
         out = store.get(args.handoff_id)
     elif args.command == "list":

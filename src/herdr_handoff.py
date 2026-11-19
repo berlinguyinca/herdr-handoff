@@ -893,14 +893,19 @@ class HandoffStore:
         self._write(path, package)
         return package
 
-    def record_takeover(self, handoff_id, changes, *, state=None, actor="local-takeover"):
+    def record_takeover(self, handoff_id, changes, *, state=None, actor="local-takeover", target_ids=None):
         """Persist the takeover block (merging `changes`) and, when asked, the handoff state.
 
         Stamps are written here rather than by the caller: `confirmed_at` and `source_closed_at` are the
         durable proof of what actually happened, and a re-run must be able to trust them after a crash.
         A phase of `confirmed` or `source_closed` stamps its own time once and never restamps it.
+        `target_ids` (pane_id / session_id of the successor) are written into the envelope's `target`.
         """
         package = self.get(handoff_id)
+        ids = {k: v for k, v in (target_ids or {}).items() if v is not None}
+        if ids:
+            package["target"] = {**(package.get("target") or {}), **ids}
+            package["schema_version"] = 2
         block = dict(validate_takeover(package.get("takeover")) or {})
         block = {**block, **changes}
         block.setdefault("version", 1)
@@ -920,6 +925,22 @@ class HandoffStore:
             package.setdefault("history", []).append({"state": state, "actor": actor, "at": package["updated_at"]})
         self._write(self._path(handoff_id), package)
         return package
+
+    def link_successor(self, predecessor_id, successor_id):
+        """Record on the predecessor that `successor_id` continues it; a record this store lacks is left alone.
+
+        The predecessor may live in another repo's store, so its absence is not an error.  Idempotent.
+        """
+        try:
+            package = self.get(predecessor_id)
+        except KeyError:
+            return
+        if package.get("successor_id") == successor_id:
+            return
+        package["successor_id"] = successor_id
+        package["schema_version"] = 2
+        package["updated_at"] = _now()
+        self._write(self._path(predecessor_id), package)
 
     def transition(self, handoff_id, state, *, actor):
         package = self.get(handoff_id)
