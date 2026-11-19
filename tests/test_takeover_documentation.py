@@ -58,5 +58,5 @@ def test_the_refusal_vocabulary_and_the_worktree_override_are_documented(relativ
 def test_takeover_help_lists_the_flags_and_the_refusals():
     done = subprocess.run([sys.executable, str(CLI), "takeover", "--help"], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
-    for token in ("--keep-source", "--source-cwd", "--allow-dirty-source", "--confirm-timeout", *REFUSAL_STATUSES):
+    for token in ("--keep-source", "--direction", "--source-cwd", "--allow-dirty-source", "--confirm-timeout", *REFUSAL_STATUSES):
         assert token in done.stdout, f"takeover --help omits {token}"

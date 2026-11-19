@@ -561,8 +561,10 @@ def short_prompt(handoff_id, document):
 
 
 def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, model_hint=None, cwd=None,
-                      prompt=None, harness_binary=None, fallback_prompt=None):
+                      prompt=None, harness_binary=None, fallback_prompt=None, direction="down"):
     """Build safe Herdr CLI operations for an interactive same-tab handoff."""
+    if direction not in DIRECTIONS:
+        raise ValueError(f"direction must be one of {sorted(DIRECTIONS)}")
     if parent_pane is not None and (not isinstance(parent_pane, str)
                                     or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}", parent_pane)):
         raise ValueError("parent pane must be a valid pane id")
@@ -585,7 +587,7 @@ def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, 
                       "types a longer command into a pane without the shell ever running it, so the full prompt "
                       "stays in the handoff document and in full_command")
     return {
-        "split": (["herdr", "pane", "split", parent_pane, "--direction", "right", "--focus"]
+        "split": (["herdr", "pane", "split", parent_pane, "--direction", direction, "--focus"]
                   + (["--cwd", cwd] if cwd else [])) if parent_pane else None,
         "run_binary": argv[0],
         "argv": argv,
@@ -652,10 +654,11 @@ def _handoff_root(handoff_file):
     return None
 
 _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
-                            "source_closed_at", "reason", "evidence"})
+                            "source_closed_at", "reason", "evidence", "direction"})
 _TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")
 _TAKEOVER_STAMPS = ("confirmed_at", "source_closed_at")
 _PLACEMENTS = frozenset({"split", "tab", "workspace"})
+DIRECTIONS = frozenset({"down", "right"})
 
 
 def validate_takeover(block):
@@ -687,6 +690,8 @@ def validate_takeover(block):
         raise ValueError("takeover reason must be a string")
     if block.get("placement") is not None and block["placement"] not in _PLACEMENTS:
         raise ValueError(f"takeover placement must be one of {sorted(_PLACEMENTS)}")
+    if block.get("direction") is not None and block["direction"] not in DIRECTIONS:
+        raise ValueError(f"takeover direction must be one of {sorted(DIRECTIONS)}")
     if block.get("evidence") is not None and not isinstance(block["evidence"], dict):
         raise ValueError("takeover evidence must be an object")
     return block

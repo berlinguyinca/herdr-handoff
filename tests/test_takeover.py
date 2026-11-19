@@ -512,3 +512,48 @@ def test_takeover_fills_pane_and_session_ids(live_herdr_server, tmp_path):
     target = source_state(root, package["handoff_id"])["target"]
     assert target["pane_id"] == out["pane_id"] != source
     assert target.get("session_id") is None
+
+
+# --- placement: the successor goes below the source by default ---------------------------------------
+
+def test_launch_plan_splits_down_by_default():
+    plan = build_launch_plan("w1:p1", "pi", ID, "/abs/outbox/x.json")
+    assert plan["split"][:6] == ["herdr", "pane", "split", "w1:p1", "--direction", "down"]
+    assert "--focus" in plan["split"]
+
+
+def test_direction_right_still_available():
+    plan = build_launch_plan("w1:p1", "pi", ID, "/abs/outbox/x.json", direction="right")
+    assert plan["split"][4:6] == ["--direction", "right"]
+
+
+def test_invalid_direction_rejected():
+    with pytest.raises(ValueError, match="direction"):
+        build_launch_plan("w1:p1", "pi", ID, "/abs/outbox/x.json", direction="left")
+    with pytest.raises(ValueError, match="direction"):
+        validate_takeover({"version": 1, "phase": "launching", "direction": "up"})
+
+
+def test_takeover_block_records_direction():
+    assert validate_takeover({"version": 1, "phase": "launching", "direction": "down"})["direction"] == "down"
+    assert validate_takeover({"version": 1, "phase": "launching", "direction": "right"})["direction"] == "right"
+
+
+@pytest.mark.integration
+def test_takeover_splits_below_by_default_and_records_it(live_herdr_server, tmp_path):
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(tmp_path)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(["--root", str(root), "takeover", package["handoff_id"], "--parent-pane", source,
+                    "--cwd", str(tmp_path), "--keep-source", "--confirm-timeout", "30"],
+                   env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert source_state(root, package["handoff_id"])["takeover"]["direction"] == "down"
+    shown = {p["pane_id"]: p for p in json.loads(subprocess.run(
+        [herdr, "pane", "list"], env=full, capture_output=True, text=True).stdout)["result"]["panes"]}
+    child = json.loads(done.stdout)["pane_id"]
+    assert shown[child].get("tab_id") == shown[source].get("tab_id")

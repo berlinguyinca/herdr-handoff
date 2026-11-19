@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from herdr_handoff import (HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
+from herdr_handoff import (DIRECTIONS, HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
                             running_subagents, short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
 
@@ -273,7 +273,7 @@ def close_pane(pane):
 
 
 def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeout=25.0, keep_source=False,
-             source_cwd=None, allow_dirty=False, allow_running_subagents=False):
+             source_cwd=None, allow_dirty=False, allow_running_subagents=False, direction="down"):
     """Start the successor in the source pane's own tab, wait for proof it is live, close the source pane.
 
     Every step is written down before it happens, so a repeat trigger (or a crash between steps) either
@@ -346,12 +346,13 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                     "source_pane": source_pane, "placement": placement, "document": document,
                     "source_closed": False, "idempotent": True}
     else:
-        store.record_takeover(handoff_id, {"phase": "launching", "source_pane": source_pane, "reason": None})
+        store.record_takeover(handoff_id, {"phase": "launching", "source_pane": source_pane, "reason": None,
+                                           "direction": direction})
         plan = build_launch_plan(source_pane, harness, handoff_id, handoff_file,
                                  model_hint=target.get("model_hint"), cwd=cwd,
                                  prompt=takeover_prompt(handoff_id, document),
                                  fallback_prompt=compact_prompt(handoff_id, confirm=True),
-                                 harness_binary=_harness_binary(harness))
+                                 harness_binary=_harness_binary(harness), direction=direction)
         try:
             pane, result, placement = _place(plan, source_pane, cwd, label)
         except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError) as exc:
@@ -546,6 +547,8 @@ def main(argv=None):
                                  help="seconds to wait for herdr to observe the successor before refusing to close")
     takeover_parser.add_argument("--keep-source", action="store_true",
                                  help="start and confirm the successor but leave the source pane running")
+    takeover_parser.add_argument("--direction", choices=sorted(DIRECTIONS), default="down",
+                                 help="where the successor pane goes relative to the source (default: down)")
     takeover_parser.add_argument("--source-cwd", default=None,
                                  help="worktree to check before closing the source pane (default: the "
                                       "directory herdr reports for that pane, else this one)")
@@ -642,7 +645,7 @@ def main(argv=None):
             out = takeover(package, root=store.root, parent_pane=args.parent_pane, cwd=args.cwd, store=store,
                            confirm_timeout=args.confirm_timeout, keep_source=args.keep_source,
                            source_cwd=args.source_cwd, allow_dirty=args.allow_dirty_source,
-                           allow_running_subagents=args.allow_running_subagents)
+                           allow_running_subagents=args.allow_running_subagents, direction=args.direction)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None      # e.g. no target harness named: say it, no traceback
         if out["status"] in ("confirmed", "source_closed"):

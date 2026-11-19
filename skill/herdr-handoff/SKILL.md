@@ -60,7 +60,7 @@ successor.
 `/herdr::toClaude`, `/herdr::toPi`, `/herdr::toCodex`, and
 `/herdr::toOpenCode` create the queued package and then run
 `herdr-handoff takeover`. The launcher writes the full handoff as a markdown
-document, splits the current pane to the right, starts the target harness
+document, splits the current pane downward (below it; `--direction right` for beside it), starts the target harness
 interactively with a one-line initial prompt that tells it to read that document
 first, reports handoff and pane metadata for dashboard visibility, and closes
 the source pane once herdr reports the successor live and the successor has run

@@ -33,7 +33,10 @@ pane, starts the selected harness interactively in the child pane with a
 one-line prompt pointing at the full handoff document, reports the
 pane/handoff metadata for dashboard visibility, and closes the pane it replaced
 once the successor has proved itself (it runs `takeover`, so see below). Pass
-`--keep-source` to want both sessions side by side. Without `HERDR_PANE_ID` it
+`--keep-source` to want both sessions side by side. The successor pane goes
+**below** the source by default (`--direction right` restores the old
+side-by-side split); this default changed from right to down on purpose in
+0.5.0. Without `HERDR_PANE_ID` it
 opens a tab (or workspace) in `--cwd`; without a running herdr it prints the
 exact command (`manual_launch_required`). It never starts a detached process,
 and it never closes anything without proof — a refusal leaves both panes up.
@@ -70,7 +73,7 @@ JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
 ```sh
 herdr-handoff takeover HANDOFF_ID [--parent-pane PANE] [--cwd DIR] \
-  [--confirm-timeout 25] [--keep-source] [--source-cwd DIR] [--allow-dirty-source] [--allow-running-subagents]
+  [--confirm-timeout 25] [--keep-source] [--direction down|right] [--source-cwd DIR] [--allow-dirty-source] [--allow-running-subagents]
 ```
 
 `takeover` is `launch` for a session that is being replaced rather than copied:
