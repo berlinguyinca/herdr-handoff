@@ -3,6 +3,14 @@
 ## 0.5.0 - 2026-11-18
 
 ### Changed
+- One takeover per handoff: a takeover holds an exclusive `flock` on `<outbox>/<id>.takeover.lock`, and a second
+  one waits five seconds and refuses with the new status `takeover_in_progress` (exit 1). Each update of a record
+  (takeover phases, transitions, `link_successor`, `confirm`) now runs under a per-record lock
+  (`<outbox>/<id>.lock`) so two processes lose no update, and records are written through a unique, fsynced
+  temp file. A record left in phase `launching` with no child pane is refused with `launch_state_unknown`
+  unless `takeover --relaunch` is passed. `confirm` before a successor pane is recorded is refused. A predecessor
+  that `create --predecessor-id` cannot link (missing or unreadable) is reported on stderr and in a `warnings`
+  field of the JSON instead of being ignored.
 - `list` (and `sync`, which iterates records) skip a record that does not parse, name it on stderr and exit 0.
 - Handoffs are no longer stored under `.herdr/handoffs` in the current repo by default. With no `--root` they go
   to one shared store (`HERDR_HANDOFF_STORE`, else `~/.local/share/herdr-handoff/store`), so a repo's earlier

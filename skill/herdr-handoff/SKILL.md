@@ -81,7 +81,10 @@ the source pane running on success; a refusal leaves it running too, and a
 refusal exits 1 with one of `launch_unconfirmed`, `launch_failed`,
 `source_close_failed`, `source_dirty`, `subagents_running` (Claude subagents
 launched from the source pane are still running; wait for them or stop them,
-or pass `--allow-running-subagents`; `--keep-source` skips the check). Report the refusal instead of retrying it
+or pass `--allow-running-subagents`; `--keep-source` skips the check),
+`takeover_in_progress` (another takeover of the same handoff is running; wait, then rerun)
+or `launch_state_unknown` (an earlier takeover died before recording its pane; close any
+stray pane, then pass `--relaunch`). Report the refusal instead of retrying it
 into silence.
 
 Without `HERDR_PANE_ID` the launcher falls back to a new tab or workspace in

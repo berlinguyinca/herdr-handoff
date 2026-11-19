@@ -7,6 +7,8 @@ create, inspect, and pass the package to another harness.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -897,6 +899,14 @@ def shared_store_root(env):
     return Path(home) / ".local" / "share" / "herdr-handoff" / "store"
 
 
+_UPDATE_LOCK_WAIT_SECONDS = 30.0
+_TAKEOVER_LOCK_WAIT_SECONDS = 5.0
+
+
+class TakeoverInProgress(RuntimeError):
+    """Another process is taking this handoff over right now."""
+
+
 class HandoffStore:
     """Filesystem-backed outbox with atomic writes and state transition checks."""
 
@@ -905,6 +915,52 @@ class HandoffStore:
         self.skipped_legacy = []
         self.outbox = self.root / "outbox"
         self.outbox.mkdir(parents=True, exist_ok=True)
+
+    @contextlib.contextmanager
+    def _flock(self, name, *, wait):
+        """Hold an exclusive `flock` on `<outbox>/<name>` for the block, waiting at most `wait` seconds.
+
+        The lock belongs to the open file, so it goes away with the process that holds it, however that
+        process ends.  Raises `TimeoutError` when the wait runs out.
+        """
+        descriptor = os.open(self.outbox / name, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(name) from None
+                    time.sleep(0.02)
+            yield
+        finally:
+            os.close(descriptor)
+
+    @contextlib.contextmanager
+    def locked(self, *handoff_ids):
+        """Exclusive access to the records `handoff_ids` for a read-modify-write.
+
+        Locks are taken in sorted id order, so two callers touching the same pair cannot deadlock.  Hold
+        it only around the update itself; a whole takeover uses `takeover_lock` instead, so a successor's
+        `confirm` is never kept waiting behind it.
+        """
+        with contextlib.ExitStack() as stack:
+            for handoff_id in sorted(set(handoff_ids)):
+                self._path(handoff_id)
+                stack.enter_context(self._flock(f"{handoff_id}.lock", wait=_UPDATE_LOCK_WAIT_SECONDS))
+            yield
+
+    @contextlib.contextmanager
+    def takeover_lock(self, handoff_id, *, wait=_TAKEOVER_LOCK_WAIT_SECONDS):
+        """Held for the whole of a takeover of `handoff_id`; `TakeoverInProgress` if another one is running."""
+        self._path(handoff_id)
+        try:
+            with self._flock(f"{handoff_id}.takeover.lock", wait=wait):
+                yield
+        except TimeoutError:
+            raise TakeoverInProgress(handoff_id) from None
 
     def _path(self, handoff_id):
         if not re.fullmatch(r"handoff_[a-f0-9]{32}", handoff_id):
@@ -923,12 +979,13 @@ class HandoffStore:
         if not handoff_id:
             raise ValueError("handoff_id is required")
         path = self._path(handoff_id)
-        if path.is_file():
-            return self.get(handoff_id)
-        package["state"] = "queued"
-        package["updated_at"] = _now()
-        package["history"] = [{"state": "queued", "actor": "local", "at": package["updated_at"]}]
-        self._write(path, package)
+        with self.locked(handoff_id):
+            if path.is_file():
+                return self.get(handoff_id)
+            package["state"] = "queued"
+            package["updated_at"] = _now()
+            package["history"] = [{"state": "queued", "actor": "local", "at": package["updated_at"]}]
+            self._write(path, package)
         return package
 
     def record_takeover(self, handoff_id, changes, *, state=None, actor="local-takeover", target_ids=None):
@@ -939,6 +996,10 @@ class HandoffStore:
         A phase of `confirmed` or `source_closed` stamps its own time once and never restamps it.
         `target_ids` (pane_id / session_id of the successor) are written into the envelope's `target`.
         """
+        with self.locked(handoff_id):
+            return self._record_takeover(handoff_id, changes, state, actor, target_ids)
+
+    def _record_takeover(self, handoff_id, changes, state, actor, target_ids):
         package = self.get(handoff_id)
         ids = {k: v for k, v in (target_ids or {}).items() if v is not None}
         if ids:
@@ -1004,30 +1065,37 @@ class HandoffStore:
         return imported
 
     def link_successor(self, predecessor_id, successor_id):
-        """Record on the predecessor that `successor_id` continues it; a record this store lacks is left alone.
+        """Record on the predecessor that `successor_id` continues it; return a warning if that cannot be done.
 
-        The predecessor may live in another repo's store, so its absence is not an error.  Idempotent.
+        A predecessor this store lacks or cannot read is reported and left alone: the successor is valid
+        without the back-link.  Idempotent.
         """
         try:
-            package = self.get(predecessor_id)
+            self.get(predecessor_id)         # no lock file is made for a record this store does not have
+            with self.locked(predecessor_id):
+                package = self.get(predecessor_id)
+                if package.get("successor_id") == successor_id:
+                    return None
+                package["successor_id"] = successor_id
+                package["schema_version"] = 2
+                package["updated_at"] = _now()
+                self._write(self._path(predecessor_id), package)
         except KeyError:
-            return
-        if package.get("successor_id") == successor_id:
-            return
-        package["successor_id"] = successor_id
-        package["schema_version"] = 2
-        package["updated_at"] = _now()
-        self._write(self._path(predecessor_id), package)
+            return f"predecessor {predecessor_id} is not in this store ({self.root}); it was not linked to {successor_id}"
+        except (OSError, ValueError) as exc:
+            return f"predecessor {predecessor_id} could not be updated ({type(exc).__name__}: {exc}); it was not linked"
+        return None
 
     def transition(self, handoff_id, state, *, actor):
-        package = self.get(handoff_id)
-        old = package["state"]
-        if state not in _STATES.get(old, set()):
-            raise ValueError(f"invalid transition: {old} -> {state}")
-        package["state"] = state
-        package["updated_at"] = _now()
-        package.setdefault("history", []).append({"state": state, "actor": actor, "at": package["updated_at"]})
-        self._write(self._path(handoff_id), package)
+        with self.locked(handoff_id):
+            package = self.get(handoff_id)
+            old = package["state"]
+            if state not in _STATES.get(old, set()):
+                raise ValueError(f"invalid transition: {old} -> {state}")
+            package["state"] = state
+            package["updated_at"] = _now()
+            package.setdefault("history", []).append({"state": state, "actor": actor, "at": package["updated_at"]})
+            self._write(self._path(handoff_id), package)
         return package
 
     def list(self):
@@ -1092,7 +1160,17 @@ class HandoffStore:
 
     @staticmethod
     def _write(path, package):
-        temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(package, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temp.replace(path)
+        """Replace `path` with `package` atomically: a unique temp file next to it, fsynced, then renamed."""
+        text = json.dumps(package, indent=2, sort_keys=True) + "\n"
+        descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=".write-", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp)
+            raise
 

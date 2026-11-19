@@ -81,7 +81,7 @@ def test_import_legacy_copies_missing_and_skips_present(tmp_path):
     assert shared.import_legacy(legacy) == [old]
     assert shared.get(both)["context"]["goal"] == "shared copy"          # the shared record wins, nothing duplicated
     assert shared.get(old)["context"]["goal"] == "old"
-    assert sorted(p.name for p in shared.outbox.iterdir()) == sorted(f"{i}.json" for i in (old, both))
+    assert sorted(p.name for p in shared.outbox.glob("*.json")) == sorted(f"{i}.json" for i in (old, both))
 
 
 def test_import_is_idempotent_and_leaves_legacy_untouched(tmp_path):

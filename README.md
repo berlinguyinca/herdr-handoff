@@ -101,9 +101,20 @@ needs proof first — herdr has to report an agent in the child pane in a settle
 state and show the handoff id in its output — and the source worktree has to
 hold nothing that exists only there. It refuses (exit 1, both panes left
 running) with statuses `launch_unconfirmed`, `launch_failed`,
-`source_close_failed`, `source_dirty`, `subagents_running`, `source_exit_failed`; the recorded phase is `unconfirmed` for
+`source_close_failed`, `source_dirty`, `subagents_running`, `source_exit_failed`,
+`takeover_in_progress`, `launch_state_unknown`; the recorded phase is `unconfirmed` for
 the launch refusals, and `confirmed` with the worktree reason for
 `source_dirty`.
+
+Only one `takeover` of a handoff runs at a time: it holds an exclusive lock on
+`<root>/outbox/<id>.takeover.lock` for its whole run, and a second one waits five
+seconds and then refuses with `takeover_in_progress` (exit 1) without launching or
+closing anything; rerun it once the first has finished and it reports that outcome.
+Every update of a record takes a short per-record lock (`<id>.lock`) so concurrent
+writers lose nothing. `launch_state_unknown` (exit 1) means a record is in phase
+`launching` with no child pane: an earlier takeover died after it began placing the
+successor and before it recorded the pane, so a stray pane may exist. Look for it and
+close it, then pass `--relaunch` to start over.
 
 `subagents_running` is checked first, before anything is launched: Claude subagents
 launched from the source pane that are still running (one file per subagent under
