@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 
 import pytest
@@ -145,10 +146,61 @@ def test_a_foreground_program_left_behind_by_the_harness_is_not_exited_until_it_
     assert pane in panes(herdr_server["herdr"], full)
 
 
+def test_a_background_job_under_the_shell_means_not_exited_and_nothing_is_typed(herdr_server, tmp_path,
+                                                                              monkeypatch):
+    use(herdr_server, monkeypatch)
+    pane, full = workspace(herdr_server, tmp_path)
+    run_in(herdr_server, pane, "sleep 61 &")           # the shell is idle again, but a child is alive
+    assert exit_source(pane, text="TYPED-MARKER-43", keys=["Enter"], timeout=2) is False
+    assert "TYPED-MARKER-43" not in read_pane(herdr_server, pane)
+
+
+def test_a_harness_suspended_with_ctrl_z_is_not_exited(herdr_server, tmp_path, monkeypatch, obedient):
+    use(herdr_server, monkeypatch)
+    pane, full = workspace(herdr_server, tmp_path)
+    run_in(herdr_server, pane, obedient)
+    wait_agent(herdr_server, pane)
+    subprocess.run([herdr_server["herdr"], "pane", "send-keys", pane, "ctrl+z"], env=full, check=True,
+                   capture_output=True)
+    time.sleep(1.5)                                    # the shell is back at its prompt, the job is stopped
+    assert exit_source(pane, text="TYPED-MARKER-44", keys=["Enter"], timeout=2) is False
+    assert pane in panes(herdr_server["herdr"], full)
+
+
+def test_a_pane_that_vanishes_while_waiting_counts_as_exited(live_herdr_server, tmp_path, monkeypatch):
+    use(live_herdr_server, monkeypatch)
+    pane, full = workspace(live_herdr_server, tmp_path)
+    other = subprocess.run([live_herdr_server["herdr"], "pane", "split", pane, "--direction", "down"], env=full,
+                           capture_output=True, text=True, check=True)
+    run_in(live_herdr_server, pane, "claude")           # ignores the exit command
+    wait_agent(live_herdr_server, pane)
+    closer = threading.Timer(1.5, lambda: subprocess.run(
+        [live_herdr_server["herdr"], "pane", "close", pane], env=full, capture_output=True))
+    closer.start()
+    assert exit_source(pane, text="/exit", keys=["Enter"], timeout=15) is True
+    closer.join()
+    assert other.returncode == 0 and pane not in panes(live_herdr_server["herdr"], full)
+
+
+def test_exit_source_for_a_pane_closed_just_before_is_exited(herdr_server, tmp_path, monkeypatch):
+    use(herdr_server, monkeypatch)
+    pane, full = workspace(herdr_server, tmp_path)
+    subprocess.run([herdr_server["herdr"], "pane", "split", pane, "--direction", "down"], env=full,
+                   check=True, capture_output=True)
+    subprocess.run([herdr_server["herdr"], "pane", "close", pane], env=full, check=True, capture_output=True)
+    assert exit_source(pane, text="/exit", keys=["Enter"], timeout=2) is True
+
+
 def test_exit_source_without_a_pane_is_false(herdr_server, monkeypatch):
     use(herdr_server, monkeypatch)
     assert exit_source(None, text="/exit", keys=["Enter"], timeout=1) is False
     assert exit_source("", text="/exit", keys=["Enter"], timeout=1) is False
+
+
+def test_the_exited_decision_refuses_any_child_of_the_shell_and_an_unanswerable_ps():
+    assert harness_exited(SHELL_INFO, False, children_of=lambda pid: []) is True
+    assert harness_exited(SHELL_INFO, False, children_of=lambda pid: ["claude"]) is False   # suspended or &
+    assert harness_exited(SHELL_INFO, False, children_of=lambda pid: None) is False         # ps failed
 
 
 SHELL_INFO = {"shell_pid": 10, "foreground_processes": [{"pid": 10, "name": "zsh", "argv0": "-zsh"}]}

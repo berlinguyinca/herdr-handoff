@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -235,6 +236,9 @@ def validate_envelope(package):
             problems.append(str(exc))
     if package.get("schema_version") == 1 and any(k in package for k in ("workspace", "links", "report")):
         problems.append("schema_version 1 envelopes cannot carry workspace, links or report")
+    provenance = package.get("provenance")
+    if isinstance(provenance, dict) and "fallback" in provenance and not isinstance(provenance["fallback"], bool):
+        problems.append("provenance.fallback must be a boolean")
     try:
         validate_takeover(package.get("takeover"))
     except ValueError as exc:
@@ -476,6 +480,8 @@ def render_handoff_markdown(package):
         lines += ["## Full report"] + [f"- {key}: {report[key]}" for key in ("path", "dashboard") if key in report] + [""]
     if package.get("artifacts"):
         lines += ["## Pinned artifacts", json.dumps(package["artifacts"], sort_keys=True), ""]
+    if (package.get("provenance") or {}).get("fallback") is True:
+        lines += ["Written by the fallback writer.", ""]
     lines += ["Do not publish or expose private infrastructure without explicit approval.", ""]
     return "\n".join(lines)
 
@@ -1025,7 +1031,15 @@ class HandoffStore:
         return package
 
     def list(self):
-        return [self.get(path.stem) for path in sorted(self.outbox.glob("handoff_*.json"))]
+        """Every record that parses; one that does not is named on stderr and left in place."""
+        packages = []
+        for path in sorted(self.outbox.glob("handoff_*.json")):
+            try:
+                packages.append(self.get(path.stem))
+            except (ValueError, OSError) as exc:
+                print(f"herdr-handoff: skipping unreadable record {path.name}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+        return packages
 
     def sync(self, base_url, *, token=None, handoff_id=None):
         """Upload queued packages to a Herdr API; local state is unchanged on failure."""

@@ -40,7 +40,9 @@ side-by-side split); this default changed from right to down on purpose in
 opens a tab (or workspace) in `--cwd`; without a running herdr it prints the
 exact command (`manual_launch_required`). It never starts a detached process,
 and it never closes anything without proof — a refusal leaves both panes up.
-`create` accepts `--decision`, `--risk`,
+`create --fallback` marks the record `provenance.fallback: true` (shown as "Written by the fallback
+writer" in the document). `list` skips a record that does not parse, names it on stderr and still
+exits 0. `create` accepts `--decision`, `--risk`,
 `--validation`, `--constraint`, `--next-command`, `--file`, `--pr`,
 `--resume-point`, `--repo`, `--branch`, `--worktree`, `--report` and
 `--from-json`; see `schemas/handoff-v2.schema.json`.
@@ -128,12 +130,13 @@ after 0.3 s the keys are pressed (`herdr pane send-keys`; an Enter sent in the s
 instant as the text is dropped by Codex), and `takeover` waits up to
 `--source-exit-timeout` seconds until the harness has exited. "Exited" means the pane is gone,
 or all of these hold: `herdr agent get` reports no agent in the pane; `herdr pane process-info`
-shows a `shell_pid` and a foreground list holding only that process; and that process is a real
-shell by name (sh, bash, zsh, fish, dash, ksh, tcsh, csh, nu, pwsh). Anything missing or unknown
+shows a `shell_pid` and a foreground list holding only that process; that process is a real
+shell by name (sh, bash, zsh, fish, dash, ksh, tcsh, csh, nu, pwsh); and the shell has no child
+process at all (`ps -A -o pid=,ppid=,comm=`), so a harness suspended with Ctrl-Z or sent to the
+background still counts as a live session, and a `ps` failure reads as not exited. Anything missing or unknown
 reads as not exited, and so does a harness started with `exec`, whose pid is the shell's. The text
 and keys are typed only while herdr reports an agent in the pane; a pane held by anything else
-(an editor, a REPL, a command) gets nothing typed and the status is `source_exit_failed`. A
-suspended (Ctrl-Z) harness counts as still present for as long as herdr reports its agent.
+(an editor, a REPL, a command) gets nothing typed and the status is `source_exit_failed`.
 Only then is the pane closed. A harness that
 ignores the command gives `source_exit_failed` (exit 1): both panes stay, the
 recorded phase is `source_exit_failed`, and a rerun reuses the successor instead of

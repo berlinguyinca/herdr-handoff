@@ -3,6 +3,10 @@
 ## Unreleased (0.5.0)
 
 ### Changed
+- `list` (and `sync`, which iterates records) skip a record that does not parse, name it on stderr and exit 0.
+- A harness is read as exited only if the pane's shell also has no child process, so a harness suspended with
+  Ctrl-Z or sent to the background is a live session. `source_exit_failed` evidence lists the child names.
+- `herdr agent get` answering `pane_not_found` also means the source pane is gone.
 - Handoffs are no longer stored under `.herdr/handoffs` in the current repo by default. With no `--root` they go
   to one shared store (`HERDR_HANDOFF_STORE`, else `~/.local/share/herdr-handoff/store`), so a repo's earlier
   handoffs are not found where they were written until they are imported: the first command in a repo copies
@@ -20,6 +24,8 @@
   direction is recorded in the takeover block as `direction`.
 
 ### Added
+- `create --fallback` records `provenance.fallback: true` (optional boolean in the schema and validator; shown in
+  the document as "Written by the fallback writer").
 - `create` run inside a herdr pane now records `source.pane_id` (from `$HERDR_PANE_ID`; `--source-pane` overrides).
 - Shared handoff store: with no `--root` a command now uses `HERDR_HANDOFF_STORE`, else
   `~/.local/share/herdr-handoff/store`, instead of `.herdr/handoffs` relative to the current directory (root

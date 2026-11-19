@@ -53,6 +53,7 @@
       "additionalProperties": false,
       "properties": {"path": {"type": "string", "pattern": "^/"}, "dashboard": {"type": "string"}}
     },
+    "provenance": {"type": "object", "properties": {"fallback": {"type": "boolean"}}},
     "artifacts": {"type": "array"},
     "memory_context": {"type": "object"},
     "redaction": {"type": "object"},

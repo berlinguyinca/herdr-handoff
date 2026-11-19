@@ -403,11 +403,28 @@ def _comm_of(pid):
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
+def _children_of(pid):
+    """Executable names of the processes whose parent is `pid`, or None when `ps` cannot say."""
+    try:
+        done = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True, text=True,
+                              timeout=_PS_TIMEOUT_SECONDS, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    names = []
+    for line in done.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[1] == str(pid):
+            names.append(os.path.basename(parts[2]) or parts[2])
+    return names
+
+
 def _is_pid(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def harness_exited(info, agent_present, *, comm_of=_comm_of):
+def harness_exited(info, agent_present, *, comm_of=_comm_of, children_of=_children_of):
     """Whether the pane holds nothing but an idle shell, judged from herdr's own observations.
 
     `info` is `herdr pane process-info`'s `process_info`; `agent_present` is whether `herdr agent get`
@@ -430,7 +447,10 @@ def harness_exited(info, agent_present, *, comm_of=_comm_of):
     name = procs[0].get("name")
     if not isinstance(name, str) or not name:
         name = comm_of(shell_pid)
-    return isinstance(name, str) and os.path.basename(name).lstrip("-") in _SHELLS
+    if not (isinstance(name, str) and os.path.basename(name).lstrip("-") in _SHELLS):
+        return False
+    children = children_of(shell_pid)
+    return isinstance(children, list) and not children
 
 
 def _gone(exc):
@@ -449,6 +469,8 @@ def _observe(pane):
     try:
         agent = (_herdr_json(["herdr", "agent", "get", pane]).get("result") or {}).get("agent")
     except subprocess.CalledProcessError as exc:
+        if _gone(exc):
+            return True, None, None
         if "agent_not_found" not in f"{exc.stdout or ''}{exc.stderr or ''}":
             raise
         agent = None
@@ -464,7 +486,9 @@ def _source_evidence(pane):
     procs = (info or {}).get("foreground_processes")
     names = [str(proc.get("name") or proc.get("argv0") or "?") for proc in procs if isinstance(proc, dict)] \
         if isinstance(procs, list) else []
-    return {"observed": True, "gone": gone, "agent": agent, "foreground": names}
+    shell_pid = (info or {}).get("shell_pid")
+    children = _children_of(shell_pid) if _is_pid(shell_pid) else None
+    return {"observed": True, "gone": gone, "agent": agent, "foreground": names, "children": children}
 
 
 def exit_source(pane, *, text, keys, timeout):
@@ -750,6 +774,8 @@ def main(argv=None):
     create.add_argument("--completed", action="append", default=[])
     for flag in ("decision", "risk", "validation", "constraint", "next-command", "file", "pr", "unverified"):
         create.add_argument(f"--{flag}", action="append", default=[])
+    create.add_argument("--fallback", action="store_true",
+                        help="mark the record as written by the fallback writer (no skill/harness integration)")
     create.add_argument("--resume-point")
     create.add_argument("--repo")
     create.add_argument("--branch")
@@ -870,6 +896,7 @@ def main(argv=None):
                                     target_harness=args.target_harness, model_hint=args.model,
                                     session_id=args.session_id, mission_id=args.mission_id,
                                     room_id=args.room_id, memory_context=build_memory_context(refs),
+                                    provenance={"fallback": True} if args.fallback else None,
                                     workspace=workspace, report=report,
                                     resume_point=args.resume_point or spec.get("resume_point"),
                                     predecessor_id=args.predecessor_id, source_pane_id=args.source_pane,
