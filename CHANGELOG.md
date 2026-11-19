@@ -1,12 +1,9 @@
 # Changelog
 
-## Unreleased (0.5.0)
+## 0.5.0 - 2026-11-18
 
 ### Changed
 - `list` (and `sync`, which iterates records) skip a record that does not parse, name it on stderr and exit 0.
-- A harness is read as exited only if the pane's shell also has no child process, so a harness suspended with
-  Ctrl-Z or sent to the background is a live session. `source_exit_failed` evidence lists the child names.
-- `herdr agent get` answering `pane_not_found` also means the source pane is gone.
 - Handoffs are no longer stored under `.herdr/handoffs` in the current repo by default. With no `--root` they go
   to one shared store (`HERDR_HANDOFF_STORE`, else `~/.local/share/herdr-handoff/store`), so a repo's earlier
   handoffs are not found where they were written until they are imported: the first command in a repo copies
@@ -46,3 +43,8 @@
   same name), and both panes stay open. Without the flags the close is direct, as before. The harness counts as
   exited only when herdr reports no agent, only an idle shell (by name) is in the foreground, or the pane is gone;
   missing data, an `exec`-started harness and non-agent programs fail closed, and nothing is typed into the latter.
+
+### Fixed
+- A harness is read as exited only if the pane's shell also has no child process, so a harness suspended with
+  Ctrl-Z or sent to the background is a live session. `source_exit_failed` evidence lists the child names.
+- `herdr agent get` answering `pane_not_found` also means the source pane is gone.
