@@ -121,6 +121,11 @@ command runs after every other refusal and only when the close would go ahead;
 without these flags the pane is closed directly, as before. The text is limited to
 900 bytes, like any typed command.
 
+When `--allow-dirty-source` actually lets a close go ahead over unsaved work, the
+takeover block records `dirty_allowed: true` and `unpushed_commits`, the short ids
+from `git rev-list HEAD --not --remotes` in the source worktree (empty when the
+directory is not a git repository), so the successor knows what exists only locally.
+
 So order a handoff this way, and nothing can be lost: make the work durable
 (commit, push, upload artifacts, file issues), create the handoff, launch the
 successor, confirm, close the source pane last.

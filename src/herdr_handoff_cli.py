@@ -15,7 +15,8 @@ import time
 
 from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
-                            running_subagents, short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
+                            running_subagents, short_prompt, source_worktree_state, takeover_prompt, unpushed_commits,
+                            worktree_close_refusal, validate_takeover, _handoff_root)
 
 
 def _run(argv, *, capture=True):
@@ -452,7 +453,7 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
         return report("confirmed", block=block, source_closed=False)
 
     source_tab = _pane_tab(source_pane) if source_pane else None
-    guard = None
+    guard, override = None, {}
     if source_pane and source_tab is None:  # the session being replaced is already gone: nothing to close
         closed = {"closed": True, "already": True, "reason": "source pane was already closed"}
     else:
@@ -475,12 +476,15 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
             reason = "the source harness did not exit after the exit command; its pane was left open"
             store.record_takeover(handoff_id, {"phase": "source_exit_failed", "child_pane": pane, "reason": reason})
             return report("source_exit_failed", block=block, source_closed=False, reason=reason, worktree=guard)
+        if allow_dirty and worktree_close_refusal(guard):
+            override = {"dirty_allowed": True, "unpushed_commits": unpushed_commits(guard.get("path"))}
         closed = close_pane(source_pane)
         if not closed["closed"]:
             store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": closed["reason"]})
             return report("source_close_failed", block=block, source_closed=False, reason=closed["reason"])
     block = store.record_takeover(handoff_id, {"phase": "already_closed" if closed["already"] else "source_closed",
-                                                "child_pane": pane, "reason": closed["reason"] or None})["takeover"]
+                                                "child_pane": pane, "reason": closed["reason"] or None,
+                                                **override})["takeover"]
     return report("source_closed", block=block, source_closed=True, reason=closed["reason"],
                   **({"worktree": guard} if guard else {}))
 

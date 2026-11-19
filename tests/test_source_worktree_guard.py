@@ -17,7 +17,12 @@ import sys
 from pathlib import Path
 
 from conftest import git, pushed_repo
-from herdr_handoff import decide_takeover_close, source_worktree_state, worktree_close_refusal
+import json
+
+import pytest
+
+from herdr_handoff import (decide_takeover_close, source_worktree_state, unpushed_commits, validate_takeover,
+                           worktree_close_refusal)
 
 SRC = str(Path(__file__).parents[1] / "src")
 
@@ -191,3 +196,89 @@ def test_the_refusal_statuses_are_documented_on_the_takeover_help():
     done = run_cli(["takeover", "--help"])
     for status in ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty"):
         assert status in done.stdout, status
+
+
+# --- recording what a close over unpushed work leaves behind ------------------------------------------
+
+def local_only_commit(work):
+    (work / "wip.py").write_text("wip = 1\n", encoding="utf-8")
+    git(work, "add", "wip.py")
+    git(work, "commit", "-q", "-m", "wip, not pushed")
+    return git(work, "rev-parse", "--short", "HEAD").stdout.strip()
+
+
+def test_unpushed_commits_are_the_short_shas_no_remote_has(tmp_path):
+    work = pushed_repo(tmp_path)
+    assert unpushed_commits(work) == []
+    sha = local_only_commit(work)
+    assert [s[:7] for s in unpushed_commits(work)] == [sha[:7]]
+    git(work, "push", "-q", "origin", "main")
+    assert unpushed_commits(work) == []
+
+
+def test_unpushed_commits_of_a_directory_that_is_not_a_repository_is_empty(tmp_path):
+    assert unpushed_commits(tmp_path) == []
+
+
+def test_the_takeover_block_accepts_the_unpushed_record_and_rejects_bad_ones():
+    block = {"version": 1, "phase": "source_closed", "dirty_allowed": True, "unpushed_commits": ["abc1234"]}
+    assert validate_takeover(block)["unpushed_commits"] == ["abc1234"]
+    for bad in ({"dirty_allowed": "yes"}, {"unpushed_commits": "abc1234"}, {"unpushed_commits": [1]}):
+        with pytest.raises(ValueError):
+            validate_takeover({"version": 1, "phase": "confirmed", **bad})
+
+
+@pytest.mark.integration
+def test_allow_dirty_records_unpushed_shas(live_herdr_server, tmp_path):
+    from test_takeover import create, panes, run_cli, source_state, takeover_args
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    repo = pushed_repo(tmp_path)
+    sha = local_only_commit(repo)
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(repo)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, repo, "--allow-dirty-source"),
+                   env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert source not in panes(herdr, full)
+    block = source_state(root, package["handoff_id"])["takeover"]
+    assert block["dirty_allowed"] is True and [s[:7] for s in block["unpushed_commits"]] == [sha[:7]]
+
+
+@pytest.mark.integration
+def test_without_flag_still_refuses_source_dirty(live_herdr_server, tmp_path):
+    from test_takeover import create, panes, run_cli, source_state, takeover_args
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    repo = pushed_repo(tmp_path)
+    local_only_commit(repo)
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(repo)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, repo), env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 1 and json.loads(done.stdout)["status"] == "source_dirty"
+    assert source in panes(herdr, full)
+    block = source_state(root, package["handoff_id"])["takeover"]
+    assert "dirty_allowed" not in block and "unpushed_commits" not in block
+
+
+@pytest.mark.integration
+def test_a_clean_close_with_the_flag_records_no_override(live_herdr_server, tmp_path):
+    from test_takeover import create, run_cli, source_state, takeover_args
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    repo = pushed_repo(tmp_path)
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(repo)], env=full,
+                                   capture_output=True, text=True).stdout)
+    source = ws["result"]["root_pane"]["pane_id"]
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, repo, "--allow-dirty-source"),
+                   env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "dirty_allowed" not in source_state(root, package["handoff_id"])["takeover"]

@@ -70,7 +70,9 @@
         "confirmed_at": {"type": "string", "minLength": 1},
         "source_closed_at": {"type": "string", "minLength": 1},
         "reason": {"type": "string"},
-        "evidence": {"type": "object"}
+        "evidence": {"type": "object"},
+        "dirty_allowed": {"type": "boolean"},
+        "unpushed_commits": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
     "history": {"type": "array"}

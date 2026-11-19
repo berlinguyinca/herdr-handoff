@@ -654,7 +654,8 @@ def _handoff_root(handoff_file):
     return None
 
 _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
-                            "source_closed_at", "reason", "evidence", "direction"})
+                            "source_closed_at", "reason", "evidence", "direction", "dirty_allowed",
+                            "unpushed_commits"})
 _TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")
 _TAKEOVER_STAMPS = ("confirmed_at", "source_closed_at")
 _PLACEMENTS = frozenset({"split", "tab", "workspace"})
@@ -694,6 +695,11 @@ def validate_takeover(block):
         raise ValueError(f"takeover direction must be one of {sorted(DIRECTIONS)}")
     if block.get("evidence") is not None and not isinstance(block["evidence"], dict):
         raise ValueError("takeover evidence must be an object")
+    if block.get("dirty_allowed") is not None and not isinstance(block["dirty_allowed"], bool):
+        raise ValueError("takeover dirty_allowed must be a boolean")
+    shas = block.get("unpushed_commits")
+    if shas is not None and (not isinstance(shas, list) or not all(isinstance(sha, str) and sha for sha in shas)):
+        raise ValueError("takeover unpushed_commits must be a list of commit ids")
     return block
 
 
@@ -708,6 +714,12 @@ def _git_text(cwd, *args):
     except (OSError, ValueError, subprocess.SubprocessError):
         return False, ""
     return done.returncode == 0, (done.stdout or "").strip()
+
+
+def unpushed_commits(path):
+    """Short ids of the commits in `path`'s worktree that no remote branch holds; empty when it is no repo."""
+    ok, out = _git_text(path, "rev-list", "--abbrev-commit", "HEAD", "--not", "--remotes")
+    return out.split() if ok else []
 
 
 def _count(value):
