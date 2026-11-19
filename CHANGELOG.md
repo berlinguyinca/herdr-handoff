@@ -8,6 +8,12 @@
   direction is recorded in the takeover block as `direction`.
 
 ### Added
+- Shared handoff store: with no `--root` a command now uses `HERDR_HANDOFF_STORE`, else
+  `~/.local/share/herdr-handoff/store`, instead of `.herdr/handoffs` relative to the current directory (root
+  order: `--root`, `HERDR_HANDOFF_FILE`, `HERDR_HANDOFF_DIR`, `HERDR_HANDOFF_STORE`, the default). The current
+  repo's legacy records are imported on first use, silently on stdout, and never deleted.
+  `herdr-handoff store import-legacy [LEGACY_ROOT]` imports on demand. `--root` behaves as before.
+- Takeover block `direction` is now in `schemas/handoff-v2.schema.json` (the validator already accepted it).
 - When `takeover --allow-dirty-source` closes a source over unsaved work, the takeover block records
   `dirty_allowed: true` and `unpushed_commits` (short ids from `git rev-list HEAD --not --remotes`). Both keys
   are optional in the schema.

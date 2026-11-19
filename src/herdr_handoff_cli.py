@@ -15,7 +15,7 @@ import time
 
 from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
-                            running_subagents, short_prompt, source_worktree_state, takeover_prompt, unpushed_commits,
+                            running_subagents, shared_store_root, short_prompt, source_worktree_state, takeover_prompt, unpushed_commits,
                             worktree_close_refusal, validate_takeover, _handoff_root)
 
 
@@ -74,16 +74,41 @@ def _announce_pane(pane, *, label, harness, handoff_id):
 
 
 def _default_root():
-    """Where the outbox lives, for a process that was started by a handoff rather than by a human.
+    """The outbox root and whether it is the shared store, for a process given no `--root`.
 
-    A successor pane is handed `herdr-handoff confirm <id>` with no path in it - the typed command has a
-    byte budget (herdr_handoff.MAX_TYPED_COMMAND) - so the root comes from HERDR_HANDOFF_FILE, which the
-    launch command exports, rather than from an argument.
+    Precedence: HERDR_HANDOFF_FILE (a successor pane is handed `herdr-handoff confirm <id>` with no path
+    in it - the typed command has a byte budget, herdr_handoff.MAX_TYPED_COMMAND - so the root comes from
+    the file the launch command exports), HERDR_HANDOFF_DIR, then the shared store (HERDR_HANDOFF_STORE,
+    else `~/.local/share/herdr-handoff/store`).  Only the shared store gets per-repo records imported.
     """
     derived = _handoff_root(os.environ.get("HERDR_HANDOFF_FILE", ""))
     if derived:
-        return derived
-    return os.environ.get("HERDR_HANDOFF_DIR", ".herdr/handoffs")
+        return derived, False
+    if os.environ.get("HERDR_HANDOFF_DIR"):
+        return os.environ["HERDR_HANDOFF_DIR"], False
+    return shared_store_root(os.environ), True
+
+
+def _legacy_root(cwd=None):
+    """The per-repo store older versions wrote: `<git toplevel, else cwd>/.herdr/handoffs`."""
+    cwd = cwd or os.getcwd()
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, text=True, capture_output=True)
+    base = top.stdout.strip() if top.returncode == 0 and top.stdout.strip() else cwd
+    return os.path.join(base, ".herdr", "handoffs")
+
+
+def _import_legacy_quietly(store):
+    """Bring the current repo's old records into the shared store; report on stderr, never on stdout."""
+    try:
+        imported = store.import_legacy(_legacy_root())
+    except OSError as exc:
+        print(f"herdr-handoff: legacy import failed: {exc}", file=sys.stderr)
+        return
+    if imported:
+        print(f"herdr-handoff: imported {len(imported)} record(s) from this repo's .herdr/handoffs: "
+              + ", ".join(imported), file=sys.stderr)
+    for name, reason in store.skipped_legacy:
+        print(f"herdr-handoff: skipped legacy record {name}: {reason}", file=sys.stderr)
 
 
 def _harness_binary(harness):
@@ -542,7 +567,8 @@ def _load_spec(source):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="herdr-handoff")
     parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument("--root", default=_default_root())
+    parser.add_argument("--root", default=None,
+                        help="handoff root (default: see README, normally the shared store)")
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create")
     create.add_argument("--goal", required=True)
@@ -574,6 +600,12 @@ def main(argv=None):
     inspect = sub.add_parser("inspect")
     inspect.add_argument("handoff_id")
     sub.add_parser("list")
+    store_parser = sub.add_parser("store", help="manage the handoff store")
+    store_sub = store_parser.add_subparsers(dest="store_command", required=True)
+    import_parser = store_sub.add_parser("import-legacy",
+                                         help="copy per-repo .herdr/handoffs records this store lacks")
+    import_parser.add_argument("legacy_root", nargs="?", default=None,
+                               help="a legacy handoff root (default: the current repo's .herdr/handoffs)")
     transition = sub.add_parser("transition")
     transition.add_argument("handoff_id")
     transition.add_argument("state")
@@ -633,8 +665,16 @@ def main(argv=None):
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
     args = parser.parse_args(argv)
+    shared = False
+    if args.root is None:
+        args.root, shared = _default_root()
     store = HandoffStore(args.root)
-    if args.command == "create":
+    if shared and args.command != "store":
+        _import_legacy_quietly(store)
+    if args.command == "store":
+        imported = store.import_legacy(args.legacy_root or _legacy_root())
+        out = {"imported": imported, "skipped": [{"file": n, "reason": r} for n, r in store.skipped_legacy]}
+    elif args.command == "create":
         artifacts = [{"artifact_id": item} for item in args.artifact]
         refs = []
         for item in args.memory_ref:

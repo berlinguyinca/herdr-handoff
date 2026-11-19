@@ -53,6 +53,18 @@ four harnesses with:
 ./install/install.sh
 ```
 
+## Where handoffs are stored
+
+Every repo shares one store. The root is, first match wins: `--root`, the root implied by
+`HERDR_HANDOFF_FILE` (what a successor pane inherits), `HERDR_HANDOFF_DIR`, `HERDR_HANDOFF_STORE`, then
+`~/.local/share/herdr-handoff/store`. Records written by older versions live in the repo's
+`.herdr/handoffs/outbox`; when a command uses the shared store it first copies the current repo's
+records it lacks into it (a message on stderr, nothing on stdout). A record already in the shared store
+wins, nothing in `.herdr/handoffs` is ever changed or deleted, and a corrupt legacy record is skipped and
+reported. `herdr-handoff store import-legacy [LEGACY_ROOT]` does the same on demand and prints
+`{"imported": [...], "skipped": [...]}`. Documents and the `confirm` command in them name the root that
+actually holds the record. Passing `--root` keeps the old behaviour exactly.
+
 Create a handoff:
 
 ```sh

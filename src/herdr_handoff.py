@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.request
 from copy import deepcopy
@@ -877,11 +878,25 @@ def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confi
     return {"close": True, "reason": ""}
 
 
+def shared_store_root(env):
+    """The one handoff store every repo shares: `HERDR_HANDOFF_STORE`, else under the user's home.
+
+    `~` comes from `env["HOME"]` when present, so a caller (or a test) can move the home without
+    touching the real one.
+    """
+    configured = env.get("HERDR_HANDOFF_STORE")
+    home = env.get("HOME") or os.path.expanduser("~")
+    if configured:
+        return Path(home, configured[2:]) if configured.startswith("~/") else Path(configured)
+    return Path(home) / ".local" / "share" / "herdr-handoff" / "store"
+
+
 class HandoffStore:
     """Filesystem-backed outbox with atomic writes and state transition checks."""
 
     def __init__(self, root):
         self.root = Path(root).expanduser()
+        self.skipped_legacy = []
         self.outbox = self.root / "outbox"
         self.outbox.mkdir(parents=True, exist_ok=True)
 
@@ -942,6 +957,37 @@ class HandoffStore:
             package.setdefault("history", []).append({"state": state, "actor": actor, "at": package["updated_at"]})
         self._write(self._path(handoff_id), package)
         return package
+
+    def import_legacy(self, legacy_root):
+        """Copy the per-repo records this store lacks from `<legacy_root>/outbox`; return the imported ids.
+
+        A record already here wins and is never touched, so an import is idempotent and cannot duplicate.
+        The legacy store is only read.  A record that is not valid JSON, or whose id is not its file name,
+        is skipped and listed in `self.skipped_legacy` as `(file name, reason)`.
+        """
+        self.skipped_legacy = []
+        source = Path(legacy_root).expanduser() / "outbox"
+        if not source.is_dir() or source.resolve() == self.outbox.resolve():
+            return []
+        imported = []
+        for path in sorted(source.glob("handoff_*.json")):
+            if (self.outbox / path.name).exists():
+                continue
+            try:
+                raw = path.read_bytes()
+                record = json.loads(raw)
+                if not isinstance(record, dict) or record.get("handoff_id") != path.stem:
+                    raise ValueError("handoff_id does not match the file name")
+                self._path(path.stem)
+            except (OSError, ValueError) as exc:
+                self.skipped_legacy.append((path.name, f"{type(exc).__name__}: {exc}"))
+                continue
+            descriptor, temp = tempfile.mkstemp(dir=self.outbox, prefix=".import-", suffix=".tmp")
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+            os.replace(temp, self.outbox / path.name)
+            imported.append(path.stem)
+        return imported
 
     def link_successor(self, predecessor_id, successor_id):
         """Record on the predecessor that `successor_id` continues it; a record this store lacks is left alone.
