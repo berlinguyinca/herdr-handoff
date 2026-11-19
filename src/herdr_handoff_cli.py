@@ -471,6 +471,10 @@ def main(argv=None):
     create.add_argument("--target-harness")
     create.add_argument("--model")
     create.add_argument("--session-id")
+    create.add_argument("--predecessor-id", help="handoff_<32 hex> of the handoff this one continues")
+    create.add_argument("--source-pane", default=os.environ.get("HERDR_PANE_ID"),
+                        help="pane the handoff is made from (default: $HERDR_PANE_ID)")
+    create.add_argument("--source-session", help="harness session id of the source")
     create.add_argument("--mission-id")
     create.add_argument("--room-id")
     create.add_argument("--remaining", action="append", default=[])
@@ -569,7 +573,9 @@ def main(argv=None):
                                     session_id=args.session_id, mission_id=args.mission_id,
                                     room_id=args.room_id, memory_context=build_memory_context(refs),
                                     workspace=workspace, report=report,
-                                    resume_point=args.resume_point or spec.get("resume_point"), **lists)
+                                    resume_point=args.resume_point or spec.get("resume_point"),
+                                    predecessor_id=args.predecessor_id, source_pane_id=args.source_pane,
+                                    source_session_id=args.source_session, **lists)
         except ValueError as exc:
             raise SystemExit(f"herdr-handoff: invalid handoff: {exc}")
         out = store.enqueue(package)

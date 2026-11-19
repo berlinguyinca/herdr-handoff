@@ -9,6 +9,8 @@
     "handoff_id": {"type": "string", "pattern": "^handoff_[a-f0-9]{32}$"},
     "schema_version": {"enum": [1, 2]},
     "state": {"enum": ["draft", "queued", "claimed", "accepted", "in_progress", "completed", "rejected", "cancelled", "expired", "failed"]},
+    "predecessor_id": {"$ref": "#/$defs/handoff_id"},
+    "successor_id": {"$ref": "#/$defs/handoff_id"},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"},
     "source": {"$ref": "#/$defs/endpoint"},
@@ -75,10 +77,15 @@
   },
   "$defs": {
     "strings": {"type": "array", "items": {"type": "string"}},
+    "handoff_id": {"type": "string", "pattern": "^handoff_[a-f0-9]{32}$"},
     "pane_or_tab_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}$"},
     "endpoint": {
       "type": "object",
-      "properties": {"harness": {"enum": ["pi", "claude", "codex", "opencode", null]}}
+      "properties": {
+        "harness": {"enum": ["pi", "claude", "codex", "opencode", null]},
+        "pane_id": {"$ref": "#/$defs/pane_or_tab_id"},
+        "session_id": {"type": "string", "minLength": 1}
+      }
     }
   }
 }

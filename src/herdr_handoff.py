@@ -60,6 +60,8 @@ def _clean(value):
     return value
 
 
+_HANDOFF_ID = re.compile(r"handoff_[a-f0-9]{32}")
+_PANE_OR_TAB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}")
 _HARNESSES = {"pi", "claude", "codex", "opencode"}
 _LIST_KEYS = ("completed", "remaining", "decisions", "risks", "validation",
               "constraints", "next_commands", "files", "unverified")
@@ -110,7 +112,7 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
                   room_id=None, source_agent_id=None, target_agent_id=None, handoff_id=None,
                   memory_context=None, workspace=None, pull_requests=None, files=None,
                   next_commands=None, constraints=None, resume_point=None, unverified=None,
-                  report=None):
+                  report=None, predecessor_id=None, source_pane_id=None, source_session_id=None):
     """Create a bounded, redacted handoff envelope suitable for any harness.
 
     The original fields keep ``schema_version`` 1.  Supplying any of the self-sufficiency fields
@@ -135,7 +137,10 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
     if resume_point is not None and not isinstance(resume_point, str):
         raise ValueError("resume_point must be a string")
     workspace, report = _clean_workspace(workspace), _clean_report(report)
-    extended = bool(any(v2.values()) or prs or resume_point or workspace or report)
+    chain = {"predecessor_id": predecessor_id}
+    ids = {k: v for k, v in (("pane_id", source_pane_id), ("session_id", source_session_id)) if v is not None}
+    extended = bool(any(v2.values()) or prs or resume_point or workspace or report
+                    or predecessor_id or source_pane_id or source_session_id)
     context = {
         "goal": goal, "completed": _text_list("completed", completed),
         "remaining": _text_list("remaining", remaining), "decisions": _text_list("decisions", decisions),
@@ -147,7 +152,7 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
         "created_at": _now(),
         "updated_at": _now(),
         "state": "draft",
-        "source": {"harness": source_harness, "agent_id": source_agent_id},
+        "source": {"harness": source_harness, "agent_id": source_agent_id, **ids},
         "target": {"harness": target_harness, "agent_id": target_agent_id,
                     "model_hint": model_hint},
         "context": context,
@@ -165,6 +170,7 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
             raw["links"] = {"pull_requests": prs}
         if report:
             raw["report"] = report
+        raw.update({k: v for k, v in chain.items() if v is not None})
     package = _clean(raw)
     if memory_context is not None:
         # Structural ids only (validated); never passed through free-text cleaning or copied from memory.
@@ -179,7 +185,7 @@ def validate_envelope(package):
     problems = []
     if not isinstance(package, dict):
         raise ValueError("envelope must be an object")
-    if not isinstance(package.get("handoff_id"), str) or not re.fullmatch(r"handoff_[a-f0-9]{32}", package["handoff_id"]):
+    if not isinstance(package.get("handoff_id"), str) or not _HANDOFF_ID.fullmatch(package["handoff_id"]):
         problems.append("handoff_id must look like handoff_<32 hex>")
     if package.get("schema_version") not in (1, 2):
         problems.append("schema_version must be 1 or 2")
@@ -198,6 +204,17 @@ def validate_envelope(package):
         harness = (package.get(side) or {}).get("harness")
         if harness not in _HARNESSES | {None}:
             problems.append(f"{side}.harness is unsupported")
+    for key in ("predecessor_id", "successor_id"):
+        if key in package and not (isinstance(package[key], str) and _HANDOFF_ID.fullmatch(package[key])):
+            problems.append(f"{key} must look like handoff_<32 hex>")
+    for side in ("source", "target"):
+        endpoint = package.get(side) or {}
+        pane = endpoint.get("pane_id")
+        if pane is not None and not (isinstance(pane, str) and _PANE_OR_TAB_ID.fullmatch(pane)):
+            problems.append(f"{side}.pane_id must be a pane id")
+        session = endpoint.get("session_id")
+        if session is not None and not (isinstance(session, str) and session.strip()):
+            problems.append(f"{side}.session_id must be a non-empty string")
     workspace = package.get("workspace")
     if workspace is not None:
         try:
@@ -634,7 +651,6 @@ def _handoff_root(handoff_file):
         return os.path.dirname(parent)
     return None
 
-_PANE_OR_TAB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}")
 _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
                             "source_closed_at", "reason", "evidence"})
 _TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")

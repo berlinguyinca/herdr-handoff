@@ -58,6 +58,11 @@ herdr-handoff create --goal "Continue the current session" \
   --remaining "Run the integration tests"
 ```
 
+Optional chain flags: `--predecessor-id handoff_<32 hex>`, `--source-pane PANE` (default `$HERDR_PANE_ID`) and
+`--source-session ID` record the handoff this one continues and where it was made from (`predecessor_id`,
+`source.pane_id`, `source.session_id`; `successor_id` and `target.pane_id`/`target.session_id` are filled later).
+The ids are never looked up, so a predecessor that no longer exists still validates.
+
 Handoffs do not launch another harness automatically. They produce a portable
 JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
