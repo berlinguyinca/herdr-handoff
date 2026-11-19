@@ -871,7 +871,6 @@ def main(argv=None):
                 "                        Wait for them or stop them, or pass --allow-running-subagents.\n"
                 "  source_exit_failed    the source harness was still running after --source-exit-text/-key;\n"
                 "                        both panes stay up, and a rerun reuses the successor.\n"
-                "Do not retry a refusal blindly: make the work durable (commit, push), then run takeover\n"
                 "  takeover_in_progress  another takeover of this handoff holds its lock (waits 5 s first);\n"
                 "                        nothing was launched or closed.  Rerun once it has finished.\n"
                 "  launch_state_unknown  an earlier takeover died after recording that it was placing the\n"

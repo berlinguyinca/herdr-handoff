@@ -39,6 +39,9 @@
 - `list` now spans every repo in the shared store (`~/.local/share/herdr-handoff/store`), not just the current one.
 - A script that reads `.herdr/handoffs/outbox/<id>.json` must pass `--root` or read the shared store instead.
 - A record is copied once on import; a record updated in either place afterwards is not synced back.
+- `takeover` JSON: `evidence.matched_line` now holds the text reduced to letters and digits, not the raw line.
+- `create` JSON gains a `warnings` list when the predecessor could not be linked.
+- File locking uses `fcntl`, so POSIX only (Linux, macOS).
 
 ### Added
 - `create --fallback` records `provenance.fallback: true` (optional boolean in the schema and validator; shown in
