@@ -60,3 +60,14 @@ def test_takeover_help_lists_the_flags_and_the_refusals():
     assert done.returncode == 0, done.stderr
     for token in ("--keep-source", "--direction", "--source-cwd", "--allow-dirty-source", "--confirm-timeout", *REFUSAL_STATUSES):
         assert token in done.stdout, f"takeover --help omits {token}"
+
+
+@pytest.mark.parametrize("relative", OPERATOR_TEXT)
+def test_docs_state_proof_is_herdr_observation(relative):
+    text = _text(relative)
+    flat = " ".join(text.split())
+    assert "herdr observes" in flat, f"{relative} does not say herdr's observation is the proof of life"
+    # the successor running `confirm` is an optional record, never the condition for closing the source
+    assert not re.search(r"(?i)successor (confirms itself|has run\s+`herdr-handoff confirm)", flat), relative
+    assert not re.search(r"(?i)confirmation comes from the successor", flat), relative
+    assert not re.search(r"(?i)closes? the (source|current) pane once .{0,80}\bhas run\b", flat), relative

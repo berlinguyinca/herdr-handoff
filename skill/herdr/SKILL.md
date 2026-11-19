@@ -37,8 +37,8 @@ Routing rules:
 
 - `toClaude`, `toPi`, `toCodex`, and `toOpenCode` create durable handoffs and
   hand over by running `herdr-handoff takeover`: the target harness starts in a
-  split of the current Herdr pane and, once herdr reports it live and it has run
-  `herdr-handoff confirm`, the current pane is closed. A trailing model is a
+  split of the current Herdr pane and, once herdr observes it live (the proof is herdr's own
+  observation; `herdr-handoff confirm` is an optional acknowledgement), the current pane is closed. A trailing model is a
   hint only. Use `--keep-source` when the user wants both sessions running, and
   report a refusal (`launch_unconfirmed`, `launch_failed`,
   `source_close_failed`, `source_dirty`, `subagents_running`) instead of closing anything by hand.
@@ -47,8 +47,8 @@ Routing rules:
 - `handoff` delegates to `herdr-handoff`.
 - `takeover` delegates to `herdr-handoff takeover`: the successor starts in a
   split inside the current pane's own tab, and the current pane is closed only
-  after herdr reports the successor live and the successor has run
-  `herdr-handoff confirm HANDOFF_ID`, and only while the source worktree holds
+  after herdr observes the successor live (an optional `herdr-handoff confirm HANDOFF_ID` from the
+  successor only records its acknowledgement), and only while the source worktree holds
   nothing uncommitted or unpushed (`source_dirty`). Without that proof the
   current pane keeps running and the refusal is reported. Make work durable
   before any handoff that closes a pane; `--allow-dirty-source` is the operator's

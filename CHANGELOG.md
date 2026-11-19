@@ -3,11 +3,17 @@
 ## Unreleased (0.5.0)
 
 ### Changed
+- Proof of life is herdr's own observation, and the docs now say so: the successor's agent is detected in a
+  settled state and the handoff id is in its output. `confirm` stays as an optional, idempotent record of the
+  successor's own acknowledgement and is not a condition for closing the source. The id match is stricter and
+  wider: after `wait-output`, the last 200 rows of `herdr pane read --source recent` are searched too, and an id
+  that appears only inside the typed launch command (echoed by the shell, wrapped or not) no longer counts.
 - `takeover` and `launch` now split the successor pane **below** the source pane by default. Before, the split
   went to the right. This is intentional. Pass `takeover --direction right` for the old layout. The chosen
   direction is recorded in the takeover block as `direction`.
 
 ### Added
+- `create` run inside a herdr pane now records `source.pane_id` (from `$HERDR_PANE_ID`; `--source-pane` overrides).
 - Shared handoff store: with no `--root` a command now uses `HERDR_HANDOFF_STORE`, else
   `~/.local/share/herdr-handoff/store`, instead of `.herdr/handoffs` relative to the current directory (root
   order: `--root`, `HERDR_HANDOFF_FILE`, `HERDR_HANDOFF_DIR`, `HERDR_HANDOFF_STORE`, the default). The current

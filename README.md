@@ -32,7 +32,7 @@ If `herdr-memory` is missing, report it unavailable without installing it.
 pane, starts the selected harness interactively in the child pane with a
 one-line prompt pointing at the full handoff document, reports the
 pane/handoff metadata for dashboard visibility, and closes the pane it replaced
-once the successor has proved itself (it runs `takeover`, so see below). Pass
+once herdr observes the successor live (it runs `takeover`, so see below). Pass
 `--keep-source` to want both sessions side by side. The successor pane goes
 **below** the source by default (`--direction right` restores the old
 side-by-side split); this default changed from right to down on purpose in
@@ -142,7 +142,9 @@ So order a handoff this way, and nothing can be lost: make the work durable
 (commit, push, upload artifacts, file issues), create the handoff, launch the
 successor, confirm, close the source pane last.
 
-The successor confirms itself: `herdr-handoff confirm HANDOFF_ID`. The handoff
+herdr observes the successor: the harness agent is detected in the child pane in a settled state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) on a line that is not the command the launcher typed, since the shell echoes that command back with the id in it. The close never waits for the successor to run anything. `herdr-handoff confirm HANDOFF_ID` stays
+as an optional, idempotent record of the successor's own acknowledgement (it stamps the successor's pane
+and `confirmed_at`). The handoff
 document spells the command out with the absolute root, and a pane started by a
 handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works
 there. Every step is recorded in the package's `takeover` block (`launching` →

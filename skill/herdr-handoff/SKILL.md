@@ -8,7 +8,7 @@ description: Create, package, transfer, and resume private Herdr work across Pi,
 Use `herdr-handoff` when work needs to move between harnesses, hosts, or
 sessions. A handoff is a durable request. `/herdr::to*` additionally launches
 the target harness interactively in a pane split from the current Herdr pane
-and, once herdr proves the successor is live, closes the current pane: a
+and, once herdr observes the successor live, closes the current pane: a
 handoff replaces the session rather than leaving it running beside its
 successor.
 
@@ -70,8 +70,9 @@ successor.
 document, splits the current pane downward (below it; `--direction right` for beside it), starts the target harness
 interactively with a one-line initial prompt that tells it to read that document
 first, reports handoff and pane metadata for dashboard visibility, and closes
-the source pane once herdr reports the successor live and the successor has run
-`herdr-handoff confirm HANDOFF_ID`.
+the source pane once herdr observes the successor live (its agent detected in a settled state, and the
+handoff id in its output on a line other than the typed launch command). The successor may run
+`herdr-handoff confirm HANDOFF_ID` to record its own acknowledgement; the close does not wait for it.
 
 Pass `--keep-source` when the user wants both sessions side by side ("open a
 Claude in parallel", "don't close this one"). It is the only form that leaves
@@ -97,10 +98,9 @@ Both use the same `create` then `launch` path.
 
 `herdr-handoff takeover HANDOFF_ID` is that behaviour on its own, for a handoff
 that already exists: it splits inside the current pane's own tab, waits for the
-successor to prove itself, and closes the source pane. Confirmation comes from
-the successor itself running `herdr-handoff confirm HANDOFF_ID` once it has read
-the document and states the Resume point — until it does, the old pane stays
-open. Never close a source pane by hand to skip that confirmation, and never use
+successor to prove itself, and closes the source pane. herdr observes the successor: the harness agent is detected in the child pane in a settled state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) on a line that is not the command the launcher typed, since the shell echoes that command back with the id in it. Until herdr observes that, the old pane stays
+open. `herdr-handoff confirm HANDOFF_ID` is an optional, idempotent record of the successor's own
+acknowledgement, not a condition. Never close a source pane by hand to skip that observation, and never use
 `--allow-dirty-source` to skip the worktree guard unless the user says the
 uncommitted or unpushed work may be left behind. `--source-cwd DIR` names the
 worktree to check when the pane sits somewhere other than the work it produced.

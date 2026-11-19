@@ -158,6 +158,7 @@ def launch(package, *, root, parent_pane, cwd=None, store=None):
 
 _CONFIRM_POLL_SECONDS = 0.5
 _CONFIRM_OUTPUT_TIMEOUT_MS = 1000
+_CONFIRM_SCROLLBACK_LINES = 200
 _CONFIRM_AGENT_WAIT_MS = 2000
 _TAKEOVER_REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty",
                               "subagents_running", "source_exit_failed")
@@ -251,9 +252,9 @@ def _agent_session(pane):
 
 
 def _wait_for_line(pane, text):
-    """A pane line herdr matched, or None within the short window."""
+    """A pane line herdr matched (unwrapped, scrollback included), or None within the short window."""
     try:
-        result = _herdr_json(["herdr", "pane", "wait-output", pane, "--match", text,
+        result = _herdr_json(["herdr", "pane", "wait-output", pane, "--match", text, "--source", "recent-unwrapped",
                               "--timeout", str(_CONFIRM_OUTPUT_TIMEOUT_MS)]).get("result") or {}
     except (subprocess.CalledProcessError, ValueError, OSError):
         return None
@@ -261,19 +262,57 @@ def _wait_for_line(pane, text):
     return line if isinstance(line, str) else None
 
 
-def confirm_successor(pane, *, harness, handoff_id, timeout):
+def _read_recent(pane):
+    """The last `_CONFIRM_SCROLLBACK_LINES` rows of the pane, scrollback included ('' when unreadable)."""
+    try:
+        return _run(["herdr", "pane", "read", pane, "--source", "recent",
+                     "--lines", str(_CONFIRM_SCROLLBACK_LINES)]).stdout
+    except (subprocess.CalledProcessError, OSError):
+        return ""
+
+
+def id_outside_command(snapshot, handoff_id, typed_command):
+    """Text around `handoff_id` in `snapshot` once the typed launch command is removed, or None.
+
+    The launcher typed `typed_command` into the pane, so the shell echoes the id back inside it, and that
+    echo is not the successor speaking.  Whitespace is dropped from both sides before the command is
+    cut out, so a command the terminal wrapped over several rows (or one behind a shell prompt) is
+    removed whole; what is left is output that did not come from the launcher.
+    """
+    squeeze = lambda text: re.sub(r"\s+", "", text)  # noqa: E731
+    rest = squeeze(snapshot)
+    if typed_command:
+        rest = rest.replace(squeeze(typed_command), "")
+    at = rest.find(handoff_id)
+    return rest[max(0, at - 60):at + len(handoff_id) + 60] if at >= 0 else None
+
+
+def _successor_spoke(pane, handoff_id, typed_command):
+    """Evidence that the id is in the pane's output other than in the command typed to start it, else None.
+
+    First what `wait-output` matches within its short window; when that is only the echoed command, or it
+    times out, the last `_CONFIRM_SCROLLBACK_LINES` rows of scrollback (a successor that printed the id
+    and then scrolled it off the screen has still printed it).
+    """
+    matched = _wait_for_line(pane, handoff_id)
+    return (id_outside_command(matched, handoff_id, typed_command) if matched else None) \
+        or id_outside_command(_read_recent(pane), handoff_id, typed_command)
+
+
+def confirm_successor(pane, *, harness, handoff_id, timeout, typed_command=None):
     """Wait for herdr to observe the successor: its agent detected, and its pane producing output.
 
     The launcher is not allowed to believe its own optimism here - both facts are read back from herdr
     about the pane it hosts.  Until both hold, the session being replaced stays open.  Neither fact is
     remembered between polls: a harness that boots and then dies is detected for a moment, and a pane
     whose process has left answers `agent_not_found`, so the proof has to hold at the moment of closing.
+    The id only counts when it is on a line that is not the typed launch command (`typed_command`).
     """
     deadline = time.monotonic() + max(0.0, float(timeout))
     evidence = {}
     while True:
         remaining = max(0.0, deadline - time.monotonic())
-        matched = _wait_for_line(pane, handoff_id)
+        matched = _successor_spoke(pane, handoff_id, typed_command)
         agent, status = _agent_state(pane, wait_ms=min(_CONFIRM_AGENT_WAIT_MS, max(200, int(remaining * 1000))))
         evidence = {"agent": agent, "agent_status": status,
                     "matched_line": matched[:200] if isinstance(matched, str) else None}
@@ -415,6 +454,12 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                     "subagents": running, "source_pane": source_pane, "pane_id": None, "tab_id": None,
                     "placement": None, "document": document, "source_closed": False, "idempotent": False}
 
+    # also on a rerun: the command typed the first time is rebuilt so its echo is never taken for proof
+    plan = build_launch_plan(source_pane, harness, handoff_id, handoff_file,
+                             model_hint=target.get("model_hint"), cwd=cwd,
+                             prompt=takeover_prompt(handoff_id, document),
+                             fallback_prompt=compact_prompt(handoff_id, confirm=True),
+                             harness_binary=_harness_binary(harness), direction=direction)
     label = f"to-{harness}-{handoff_id[-8:]}"
     if child:
         pane, placement, tab_id = child, recorded.get("placement") or "split", recorded.get("tab_id")
@@ -427,11 +472,6 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
     else:
         store.record_takeover(handoff_id, {"phase": "launching", "source_pane": source_pane, "reason": None,
                                            "direction": direction})
-        plan = build_launch_plan(source_pane, harness, handoff_id, handoff_file,
-                                 model_hint=target.get("model_hint"), cwd=cwd,
-                                 prompt=takeover_prompt(handoff_id, document),
-                                 fallback_prompt=compact_prompt(handoff_id, confirm=True),
-                                 harness_binary=_harness_binary(harness), direction=direction)
         try:
             pane, result, placement = _place(plan, source_pane, cwd, label)
         except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError) as exc:
@@ -461,7 +501,8 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
     if block.get("confirmed_at"):
         confirmed, evidence = True, {**(block.get("evidence") or {}), "source": "confirmed record"}
     else:
-        verdict = confirm_successor(pane, harness=harness, handoff_id=handoff_id, timeout=confirm_timeout)
+        verdict = confirm_successor(pane, harness=harness, handoff_id=handoff_id, timeout=confirm_timeout,
+                                    typed_command=plan["run_command"])
         confirmed, evidence = verdict["confirmed"], verdict["evidence"]
     if not confirmed:
         detail = (f"herdr saw agent={evidence.get('agent') or 'nothing'}"
