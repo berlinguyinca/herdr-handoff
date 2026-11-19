@@ -628,7 +628,7 @@ def takeover_prompt(handoff_id, document, *, root=None):
 
 
 TAKEOVER_PHASES = frozenset({"launching", "launched", "confirmed", "source_closed", "unconfirmed",
-                             "launch_failed", "already_closed"})
+                             "launch_failed", "already_closed", "source_exit_failed"})
 """Durable phases of a takeover, in causal order: launch, confirm, then close the source pane."""
 
 MAX_TYPED_COMMAND = 900

@@ -12,3 +12,7 @@
   `target.session_id`, all optional. `create` takes `--predecessor-id`, `--source-pane` and `--source-session`.
 - `takeover` records the successor's `target.pane_id` and, when herdr reports one, `target.session_id`.
   `create --predecessor-id X` sets `successor_id` on handoff X.
+- `takeover --source-exit-text TEXT --source-exit-key KEY --source-exit-timeout SECONDS`: ask the source harness
+  to exit and wait until `herdr pane process-info` shows no process but the pane's shell before closing the
+  pane. A harness that does not exit gives the refusal status `source_exit_failed` (new takeover phase of the
+  same name), and both panes stay open. Without the flags the close is direct, as before.

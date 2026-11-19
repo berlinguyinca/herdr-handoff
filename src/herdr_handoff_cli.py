@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from herdr_handoff import (DIRECTIONS, HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
+from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, __version__, build_handoff, build_launch_plan, build_memory_context,
                             compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
                             running_subagents, short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
 
@@ -134,7 +134,7 @@ _CONFIRM_POLL_SECONDS = 0.5
 _CONFIRM_OUTPUT_TIMEOUT_MS = 1000
 _CONFIRM_AGENT_WAIT_MS = 2000
 _TAKEOVER_REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty",
-                              "subagents_running")
+                              "subagents_running", "source_exit_failed")
 
 _WORKTREE_REFUSAL_HINTS = {
     "worktree_dirty": "tracked changes are not committed",
@@ -272,8 +272,58 @@ def close_pane(pane):
                 "reason": f"herdr refused to close the source pane: {detail.strip()[:200]}"}
 
 
+_EXIT_TEXT_KEY_PAUSE_SECONDS = 0.3
+_EXIT_POLL_SECONDS = 0.5
+
+
+def _harness_running(pane):
+    """True while the pane has a foreground process other than its own shell.
+
+    `herdr pane process-info --pane P` lists `foreground_processes` and names the pane's `shell_pid`.  An
+    idle pane (or one whose harness has exited) shows only the shell in the foreground; a running harness,
+    or anything else the shell started, shows up as a further process.  A pane herdr no longer knows has
+    nothing left running.
+    """
+    try:
+        info = _herdr_json(["herdr", "pane", "process-info", "--pane", pane])
+    except subprocess.CalledProcessError as exc:
+        if "pane_not_found" in f"{exc.stdout or ''}{exc.stderr or ''}":
+            return False
+        raise
+    info = (info.get("result") or {}).get("process_info") or {}
+    return any(proc.get("pid") != info.get("shell_pid") for proc in info.get("foreground_processes") or [])
+
+
+def exit_source(pane, *, text, keys, timeout):
+    """Ask the harness in `pane` to exit, then wait until it has.  True means nothing is left running.
+
+    A pane with no harness process already counts as exited and nothing is sent.  The text goes in first
+    and the keys follow after a short pause: Codex drops an Enter that arrives in the same instant as the
+    text.  Any herdr failure, or a harness still running after `timeout` seconds, returns False so the
+    caller leaves the source pane open.
+    """
+    try:
+        if not _harness_running(pane):
+            return True
+        if text:
+            _run(["herdr", "pane", "send-text", pane, text])
+        if text and keys:
+            time.sleep(_EXIT_TEXT_KEY_PAUSE_SECONDS)
+        if keys:
+            _run(["herdr", "pane", "send-keys", pane, *keys])
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(_EXIT_POLL_SECONDS)
+            if not _harness_running(pane):
+                return True
+        return not _harness_running(pane)
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return False
+
+
 def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeout=25.0, keep_source=False,
-             source_cwd=None, allow_dirty=False, allow_running_subagents=False, direction="down"):
+             source_cwd=None, allow_dirty=False, allow_running_subagents=False, direction="down",
+             source_exit_text=None, source_exit_keys=(), source_exit_timeout=30.0):
     """Start the successor in the source pane's own tab, wait for proof it is live, close the source pane.
 
     Every step is written down before it happens, so a repeat trigger (or a crash between steps) either
@@ -286,6 +336,9 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
     judgement that the work in that worktree may be left behind.  Claude subagents still running from the
     source pane would die with it, so unless `allow_running_subagents` or `keep_source` says otherwise the
     takeover is refused before anything is launched.
+
+    When `source_exit_text` or `source_exit_keys` is given, the source harness is asked to exit and must
+    be gone before its pane is closed; if it is not, the pane stays and the status is `source_exit_failed`.
     """
     store = store or HandoffStore(root)
     handoff_id = package["handoff_id"]
@@ -417,6 +470,11 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                                                "evidence": {**(block.get("evidence") or {}),
                                                             "worktree": guard}})
             return report(status, block=block, source_closed=False, reason=reason, worktree=guard)
+        if (source_exit_text or source_exit_keys) and not exit_source(
+                source_pane, text=source_exit_text, keys=source_exit_keys, timeout=source_exit_timeout):
+            reason = "the source harness did not exit after the exit command; its pane was left open"
+            store.record_takeover(handoff_id, {"phase": "source_exit_failed", "child_pane": pane, "reason": reason})
+            return report("source_exit_failed", block=block, source_closed=False, reason=reason, worktree=guard)
         closed = close_pane(source_pane)
         if not closed["closed"]:
             store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": closed["reason"]})
@@ -538,6 +596,8 @@ def main(argv=None):
                 "  subagents_running     Claude subagents launched from the source pane are still running\n"
                 "                        (checked before anything is launched; the handoff stays queued).\n"
                 "                        Wait for them or stop them, or pass --allow-running-subagents.\n"
+                "  source_exit_failed    the source harness was still running after --source-exit-text/-key;\n"
+                "                        both panes stay up, and a rerun reuses the successor.\n"
                 "Do not retry a refusal blindly: make the work durable (commit, push), then run takeover\n"
                 "again, or close the source anyway with --allow-dirty-source."))
     takeover_parser.add_argument("handoff_id")
@@ -558,6 +618,13 @@ def main(argv=None):
     takeover_parser.add_argument("--allow-running-subagents", action="store_true",
                                  help="hand off even though Claude subagents launched from the source pane "
                                       "are still running (they die when the pane closes)")
+    takeover_parser.add_argument("--source-exit-text", default=None,
+                                 help=f"text typed into the source pane to make its harness exit (max "
+                                      f"{MAX_TYPED_COMMAND} bytes); sent before --source-exit-key")
+    takeover_parser.add_argument("--source-exit-key", action="append", default=[],
+                                 help="key pressed in the source pane after the text, e.g. Enter (repeatable)")
+    takeover_parser.add_argument("--source-exit-timeout", type=float, default=30.0,
+                                 help="seconds to wait for the source harness to exit before refusing to close")
     confirm_parser = sub.add_parser("confirm")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
@@ -634,6 +701,8 @@ def main(argv=None):
         store.transition(args.handoff_id, "in_progress", actor="local-launch")
         out["dashboard"] = _sync_after_start(store, args.handoff_id, control_url, control_token)
     elif args.command == "takeover":
+        if args.source_exit_text is not None and len(args.source_exit_text.encode()) > MAX_TYPED_COMMAND:
+            parser.error(f"--source-exit-text is over {MAX_TYPED_COMMAND} bytes, which herdr cannot type reliably")
         package = store.get(args.handoff_id)
         if package.get("state") != "queued" and not validate_takeover(package.get("takeover")):
             raise SystemExit(f"handoff must be queued before takeover (state={package.get('state')})")
@@ -645,7 +714,9 @@ def main(argv=None):
             out = takeover(package, root=store.root, parent_pane=args.parent_pane, cwd=args.cwd, store=store,
                            confirm_timeout=args.confirm_timeout, keep_source=args.keep_source,
                            source_cwd=args.source_cwd, allow_dirty=args.allow_dirty_source,
-                           allow_running_subagents=args.allow_running_subagents, direction=args.direction)
+                           allow_running_subagents=args.allow_running_subagents, direction=args.direction,
+                           source_exit_text=args.source_exit_text, source_exit_keys=args.source_exit_key,
+                           source_exit_timeout=args.source_exit_timeout)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None      # e.g. no target harness named: say it, no traceback
         if out["status"] in ("confirmed", "source_closed"):

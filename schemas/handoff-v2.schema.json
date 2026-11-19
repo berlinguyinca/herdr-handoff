@@ -62,7 +62,7 @@
       "required": ["version", "phase"],
       "properties": {
         "version": {"const": 1},
-        "phase": {"enum": ["launching", "launched", "confirmed", "source_closed", "unconfirmed", "launch_failed", "already_closed"]},
+        "phase": {"enum": ["launching", "launched", "confirmed", "source_closed", "unconfirmed", "launch_failed", "already_closed", "source_exit_failed"]},
         "source_pane": {"$ref": "#/$defs/pane_or_tab_id"},
         "child_pane": {"$ref": "#/$defs/pane_or_tab_id"},
         "tab_id": {"$ref": "#/$defs/pane_or_tab_id"},

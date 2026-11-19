@@ -177,7 +177,7 @@ def test_takeover_block_is_validated():
             validate_takeover(bad)
     assert validate_takeover(None) is None
     assert {"launching", "launched", "confirmed", "source_closed", "unconfirmed",
-            "launch_failed", "already_closed"} == TAKEOVER_PHASES
+            "launch_failed", "already_closed", "source_exit_failed"} == TAKEOVER_PHASES
 
 
 def test_launch_plan_can_be_built_for_a_takeover_without_changing_a_plain_launch():

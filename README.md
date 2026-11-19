@@ -73,7 +73,8 @@ JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
 ```sh
 herdr-handoff takeover HANDOFF_ID [--parent-pane PANE] [--cwd DIR] \
-  [--confirm-timeout 25] [--keep-source] [--direction down|right] [--source-cwd DIR] [--allow-dirty-source] [--allow-running-subagents]
+  [--confirm-timeout 25] [--keep-source] [--direction down|right] [--source-cwd DIR] [--allow-dirty-source] [--allow-running-subagents] \
+  [--source-exit-text TEXT] [--source-exit-key KEY ...] [--source-exit-timeout 30]
 ```
 
 `takeover` is `launch` for a session that is being replaced rather than copied:
@@ -84,7 +85,7 @@ needs proof first — herdr has to report an agent in the child pane in a settle
 state and show the handoff id in its output — and the source worktree has to
 hold nothing that exists only there. It refuses (exit 1, both panes left
 running) with statuses `launch_unconfirmed`, `launch_failed`,
-`source_close_failed`, `source_dirty`, `subagents_running`; the recorded phase is `unconfirmed` for
+`source_close_failed`, `source_dirty`, `subagents_running`, `source_exit_failed`; the recorded phase is `unconfirmed` for
 the launch refusals, and `confirmed` with the worktree reason for
 `source_dirty`.
 
@@ -106,6 +107,19 @@ work may stay behind, and `--source-cwd DIR` names the worktree to check when
 the pane sits somewhere other than the work it produced. The guard never buys
 its way past the other refusals: an unconfirmed successor still cannot close a
 pane.
+
+`--source-exit-text` / `--source-exit-key` make the close clean: just before the pane
+is closed, the text is typed into the source pane (`herdr pane send-text`), then
+after 0.3 s the keys are pressed (`herdr pane send-keys`; an Enter sent in the same
+instant as the text is dropped by Codex), and `takeover` waits up to
+`--source-exit-timeout` seconds until `herdr pane process-info` shows nothing in the
+pane's foreground but its own shell. Only then is the pane closed. A harness that
+ignores the command gives `source_exit_failed` (exit 1): both panes stay, the
+recorded phase is `source_exit_failed`, and a rerun reuses the successor instead of
+launching another. A source that has already exited counts as exited. The exit
+command runs after every other refusal and only when the close would go ahead;
+without these flags the pane is closed directly, as before. The text is limited to
+900 bytes, like any typed command.
 
 So order a handoff this way, and nothing can be lost: make the work durable
 (commit, push, upload artifacts, file issues), create the handoff, launch the
