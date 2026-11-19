@@ -67,6 +67,7 @@
         "child_pane": {"$ref": "#/$defs/pane_or_tab_id"},
         "tab_id": {"$ref": "#/$defs/pane_or_tab_id"},
         "placement": {"enum": ["split", "tab", "workspace"]},
+        "direction": {"enum": ["down", "right"]},
         "confirmed_at": {"type": "string", "minLength": 1},
         "source_closed_at": {"type": "string", "minLength": 1},
         "reason": {"type": "string"},

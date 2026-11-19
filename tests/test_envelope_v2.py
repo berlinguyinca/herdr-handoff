@@ -128,3 +128,18 @@ def test_json_schema_matches_the_builder_when_jsonschema_is_available():
     bad["context"]["constraints"] = "x"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(bad, schema)
+
+
+def test_json_schema_takeover_direction_matches_the_validator():
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads((Path(__file__).parents[1] / "schemas" / "handoff-v2.schema.json").read_text())
+    package = build_handoff(goal="g")
+    for direction in ("down", "right"):
+        package["takeover"] = {"version": 1, "phase": "launched", "direction": direction}
+        validate_envelope(package)
+        jsonschema.validate(package, schema)
+    package["takeover"] = {"version": 1, "phase": "launched", "direction": "up"}
+    with pytest.raises(ValueError):
+        validate_envelope(package)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(package, schema)
