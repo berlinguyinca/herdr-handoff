@@ -124,8 +124,15 @@ pane.
 is closed, the text is typed into the source pane (`herdr pane send-text`), then
 after 0.3 s the keys are pressed (`herdr pane send-keys`; an Enter sent in the same
 instant as the text is dropped by Codex), and `takeover` waits up to
-`--source-exit-timeout` seconds until `herdr pane process-info` shows nothing in the
-pane's foreground but its own shell. Only then is the pane closed. A harness that
+`--source-exit-timeout` seconds until the harness has exited. "Exited" means the pane is gone,
+or all of these hold: `herdr agent get` reports no agent in the pane; `herdr pane process-info`
+shows a `shell_pid` and a foreground list holding only that process; and that process is a real
+shell by name (sh, bash, zsh, fish, dash, ksh, tcsh, csh, nu, pwsh). Anything missing or unknown
+reads as not exited, and so does a harness started with `exec`, whose pid is the shell's. The text
+and keys are typed only while herdr reports an agent in the pane; a pane held by anything else
+(an editor, a REPL, a command) gets nothing typed and the status is `source_exit_failed`. A
+suspended (Ctrl-Z) harness counts as still present for as long as herdr reports its agent.
+Only then is the pane closed. A harness that
 ignores the command gives `source_exit_failed` (exit 1): both panes stay, the
 recorded phase is `source_exit_failed`, and a rerun reuses the successor instead of
 launching another. A source that has already exited counts as exited. The exit

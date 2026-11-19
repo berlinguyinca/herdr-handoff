@@ -44,7 +44,7 @@ successor.
 - To exit the source harness cleanly before its pane closes, pass
   `--source-exit-text TEXT` and/or `--source-exit-key KEY` (repeatable, e.g. `Enter`)
   with `--source-exit-timeout SECONDS` (default 30). If the harness is still running
-  afterwards the status is `source_exit_failed`: both panes stay, and a rerun reuses
+  afterwards (or the pane holds a non-agent program, which gets nothing typed) the status is `source_exit_failed`: both panes stay, and a rerun reuses
   the successor.
 
 - `memory_context` holds memory ids/revisions only. Treat anything resolved

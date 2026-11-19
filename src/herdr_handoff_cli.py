@@ -341,47 +341,120 @@ _EXIT_TEXT_KEY_PAUSE_SECONDS = 0.3
 _EXIT_POLL_SECONDS = 0.5
 
 
-def _harness_running(pane):
-    """True while the pane has a foreground process other than its own shell.
+_SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh"})
+_PS_TIMEOUT_SECONDS = 5
 
-    `herdr pane process-info --pane P` lists `foreground_processes` and names the pane's `shell_pid`.  An
-    idle pane (or one whose harness has exited) shows only the shell in the foreground; a running harness,
-    or anything else the shell started, shows up as a further process.  A pane herdr no longer knows has
-    nothing left running.
-    """
+
+def _comm_of(pid):
+    """The executable name of `pid` according to `ps`, or "" when it cannot be had."""
     try:
-        info = _herdr_json(["herdr", "pane", "process-info", "--pane", pane])
+        done = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True,
+                              timeout=_PS_TIMEOUT_SECONDS, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _is_pid(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def harness_exited(info, agent_present, *, comm_of=_comm_of):
+    """Whether the pane holds nothing but an idle shell, judged from herdr's own observations.
+
+    `info` is `herdr pane process-info`'s `process_info`; `agent_present` is whether `herdr agent get`
+    reports an agent in the pane.  The answer is True only when all of these hold, and any missing datum
+    reads as False (the source keeps running):
+      - herdr reports no agent in the pane;
+      - `shell_pid` and a non-empty `foreground_processes` list are present (an idle shell is listed as
+        its own foreground process, so an empty list is not evidence of anything);
+      - every foreground process is the shell process itself;
+      - that process is a real shell by executable name.  A harness started with `exec` (or as the pane's
+        root command) has the shell's pid, so the pid alone proves nothing.
+    """
+    if agent_present is not False or not isinstance(info, dict):
+        return False
+    shell_pid, procs = info.get("shell_pid"), info.get("foreground_processes")
+    if not _is_pid(shell_pid) or not isinstance(procs, list) or not procs:
+        return False
+    if any(not isinstance(proc, dict) or proc.get("pid") != shell_pid for proc in procs):
+        return False
+    name = procs[0].get("name")
+    if not isinstance(name, str) or not name:
+        name = comm_of(shell_pid)
+    return isinstance(name, str) and os.path.basename(name).lstrip("-") in _SHELLS
+
+
+def _gone(exc):
+    return "pane_not_found" in f"{exc.stdout or ''}{exc.stderr or ''}"
+
+
+def _observe(pane):
+    """(gone, process_info, agent_present) for `pane`; any herdr error but a vanished pane is raised."""
+    try:
+        reply = _herdr_json(["herdr", "pane", "process-info", "--pane", pane])
     except subprocess.CalledProcessError as exc:
-        if "pane_not_found" in f"{exc.stdout or ''}{exc.stderr or ''}":
-            return False
+        if _gone(exc):
+            return True, None, None
         raise
-    info = (info.get("result") or {}).get("process_info") or {}
-    return any(proc.get("pid") != info.get("shell_pid") for proc in info.get("foreground_processes") or [])
+    info = (reply.get("result") or {}).get("process_info")
+    try:
+        agent = (_herdr_json(["herdr", "agent", "get", pane]).get("result") or {}).get("agent")
+    except subprocess.CalledProcessError as exc:
+        if "agent_not_found" not in f"{exc.stdout or ''}{exc.stderr or ''}":
+            raise
+        agent = None
+    return False, info, isinstance(agent, dict)
+
+
+def _source_evidence(pane):
+    """What herdr shows in the source pane now, for the record of a refused exit."""
+    try:
+        gone, info, agent = _observe(pane)
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return {"observed": False}
+    procs = (info or {}).get("foreground_processes")
+    names = [str(proc.get("name") or proc.get("argv0") or "?") for proc in procs if isinstance(proc, dict)] \
+        if isinstance(procs, list) else []
+    return {"observed": True, "gone": gone, "agent": agent, "foreground": names}
 
 
 def exit_source(pane, *, text, keys, timeout):
-    """Ask the harness in `pane` to exit, then wait until it has.  True means nothing is left running.
+    """Ask the harness in `pane` to exit, then wait until it has.  True means nothing is left to protect.
 
-    A pane with no harness process already counts as exited and nothing is sent.  The text goes in first
-    and the keys follow after a short pause: Codex drops an Enter that arrives in the same instant as the
-    text.  Any herdr failure, or a harness still running after `timeout` seconds, returns False so the
-    caller leaves the source pane open.
+    The pane counts as exited when it is gone, or when `harness_exited` says only an idle shell is left.
+    Typing happens only when herdr reports an agent in the pane: anything else holding the foreground (an
+    editor, a REPL, a running command) must not receive an exit command, so that returns False.  The text
+    goes in first and the keys follow after a short pause: Codex drops an Enter that arrives in the same
+    instant as the text.  Any other herdr failure, or an agent still there after `timeout` seconds,
+    returns False so the caller leaves the source pane open.  A harness that is suspended (Ctrl-Z) is
+    still read as present for as long as herdr reports its agent.
     """
+    if not isinstance(pane, str) or not pane:
+        return False
     try:
-        if not _harness_running(pane):
+        gone, info, agent = _observe(pane)
+        if gone or harness_exited(info, agent):
             return True
-        if text:
-            _run(["herdr", "pane", "send-text", pane, text])
-        if text and keys:
-            time.sleep(_EXIT_TEXT_KEY_PAUSE_SECONDS)
-        if keys:
-            _run(["herdr", "pane", "send-keys", pane, *keys])
+        if not agent:
+            return False
+        try:
+            if text:
+                _run(["herdr", "pane", "send-text", pane, text])
+            if text and keys:
+                time.sleep(_EXIT_TEXT_KEY_PAUSE_SECONDS)
+            if keys:
+                _run(["herdr", "pane", "send-keys", pane, *keys])
+        except subprocess.CalledProcessError as exc:
+            return _gone(exc)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
             time.sleep(_EXIT_POLL_SECONDS)
-            if not _harness_running(pane):
+            gone, info, agent = _observe(pane)
+            if gone or harness_exited(info, agent):
                 return True
-        return not _harness_running(pane)
+            if time.monotonic() >= deadline:
+                return False
     except (subprocess.CalledProcessError, ValueError, OSError):
         return False
 
@@ -540,7 +613,9 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
         if (source_exit_text or source_exit_keys) and not exit_source(
                 source_pane, text=source_exit_text, keys=source_exit_keys, timeout=source_exit_timeout):
             reason = "the source harness did not exit after the exit command; its pane was left open"
-            store.record_takeover(handoff_id, {"phase": "source_exit_failed", "child_pane": pane, "reason": reason})
+            store.record_takeover(handoff_id, {"phase": "source_exit_failed", "child_pane": pane, "reason": reason,
+                                               "evidence": {**(block.get("evidence") or {}),
+                                                            "source_exit": _source_evidence(source_pane)}})
             return report("source_exit_failed", block=block, source_closed=False, reason=reason, worktree=guard)
         if allow_dirty and worktree_close_refusal(guard):
             override = {"dirty_allowed": True, "unpushed_commits": unpushed_commits(guard.get("path"))}

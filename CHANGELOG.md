@@ -30,4 +30,6 @@
 - `takeover --source-exit-text TEXT --source-exit-key KEY --source-exit-timeout SECONDS`: ask the source harness
   to exit and wait until `herdr pane process-info` shows no process but the pane's shell before closing the
   pane. A harness that does not exit gives the refusal status `source_exit_failed` (new takeover phase of the
-  same name), and both panes stay open. Without the flags the close is direct, as before.
+  same name), and both panes stay open. Without the flags the close is direct, as before. The harness counts as
+  exited only when herdr reports no agent, only an idle shell (by name) is in the foreground, or the pane is gone;
+  missing data, an `exec`-started harness and non-agent programs fail closed, and nothing is typed into the latter.
