@@ -79,7 +79,8 @@ handoff id in its output on a line other than the typed launch command). The suc
 already gave up waiting, `confirm` closes the source pane under the same checks takeover uses. Read `close` in its
 JSON: `source_closed` or `already_closed` (the pane is gone), `refused` (`reason` says why: unpushed commits, a
 dirty worktree or another tab; the pane stays open), or `not_attempted` (`--keep-source`, an older record, no
-source pane, or a takeover still running). It exits 0 whenever the confirmation is recorded.
+source pane, or a takeover still running). It exits 0 whenever the confirmation is recorded. A repeated `confirm`
+retries a close that failed earlier, and `confirm` can wait up to the source-exit timeout for the source harness to exit.
 
 Pass `--keep-source` when the user wants both sessions side by side ("open a
 Claude in parallel", "don't close this one"). It is the only form that leaves

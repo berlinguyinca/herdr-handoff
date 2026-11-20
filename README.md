@@ -177,7 +177,8 @@ the successor to run anything. `herdr-handoff confirm HANDOFF_ID` is idempotent.
 successor's own acknowledgement (it stamps the successor's pane and `confirmed_at`) and, if takeover gave up
 waiting first, closes the source pane under the same checks takeover uses (never after `--keep-source`, for a
 0.5.0 record, or while a takeover runs); its JSON reports `close`, `source_closed`, `reason` and
-`source_closed_at`, and it exits 0 whenever the confirmation is recorded. The handoff
+`source_closed_at`, and it exits 0 whenever the confirmation is recorded. A repeated `confirm` retries a close that failed earlier, and
+`confirm` can wait up to the source-exit timeout for the source harness to exit. The handoff
 document spells the command out with the absolute root, and a pane started by a
 handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works
 there. Every step is recorded in the package's `takeover` block (`launching` →

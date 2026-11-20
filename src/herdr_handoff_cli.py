@@ -977,7 +977,9 @@ def main(argv=None):
                     "(unpushed commits, a dirty worktree or another tab refuse). It never closes after "
                     "--keep-source, for a record written by takeover 0.5.0, or while a takeover is running. "
                     "The JSON carries close (source_closed, already_closed, refused or not_attempted), "
-                    "source_closed, reason and source_closed_at; exit is 0 whenever the confirmation is recorded.")
+                    "source_closed, reason and source_closed_at; exit is 0 whenever the confirmation is recorded. "
+                    "A repeated confirm retries a close that failed earlier, and it can wait up to the "
+                    "source-exit timeout while the source harness exits.")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
     args = parser.parse_args(argv)
