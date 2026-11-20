@@ -11,18 +11,21 @@ import pytest
 from conftest import pushed_repo
 from herdr_handoff import HandoffStore
 from test_source_worktree_guard import local_only_commit
+from test_source_exit import run_in
 from test_takeover import create, panes, run_cli, source_state, takeover_args
 
 CONFIRM_TIMEOUT = "3"
 
 
-def start(herdr_server, cwd, tmp_path, *extra):
+def start(herdr_server, cwd, tmp_path, *extra, prep=None):
     """Run a takeover whose recorder harness never goes live, so it gives up before confirmation."""
     env, herdr = herdr_server["env"], herdr_server["herdr"]
     full = {**os.environ, **env}
     ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(cwd)], env=full,
                                    capture_output=True, text=True).stdout)
     source = ws["result"]["root_pane"]["pane_id"]
+    if prep:
+        prep(herdr_server, source)
     root = tmp_path / "root"
     package = create(root, env=env)
     args = takeover_args(root, package["handoff_id"], source, cwd, *extra)
@@ -142,3 +145,31 @@ def test_only_the_successor_pane_can_trigger_the_close(herdr_server, tmp_path):
     done = confirm(s, pane=s["source"])
     assert done.returncode != 0 and "only the successor pane" in (done.stderr + done.stdout)
     assert s["source"] in panes(s["herdr"], s["full"])
+
+
+@pytest.mark.integration
+def test_a_late_confirm_refuses_when_the_source_agent_ignores_the_exit(herdr_server, tmp_path):
+    def program_that_ignores_exit(server, pane):
+        # herdr_server's `claude` never goes live (that is what makes takeover give up), so the source is a
+        # real foreground program that cannot exit on `/exit` instead of a detected agent
+        run_in(server, pane, "sleep 300")
+
+    s = start(herdr_server, tmp_path, tmp_path, "--source-exit-text", "/exit", "--source-exit-key", "Enter",
+              "--source-exit-timeout", "2", prep=program_that_ignores_exit)
+    assert source_state(s["root"], s["id"])["takeover"]["phase"] == "unconfirmed"   # takeover gave up waiting
+    out = json.loads(confirm(s).stdout)
+    assert out["close"] == "refused" and out["source_closed"] is False and "did not exit" in out["reason"]
+    assert s["source"] in panes(s["herdr"], s["full"])
+    stored = source_state(s["root"], s["id"])["takeover"]
+    assert stored["phase"] == "source_exit_failed" and not stored.get("source_closed_at")
+
+
+@pytest.mark.integration
+def test_a_late_confirm_without_a_recorded_source_pane_closes_nothing(herdr_server, tmp_path):
+    s = start(herdr_server, tmp_path, tmp_path)
+    edit_record(s, lambda block: block.pop("source_pane"))
+    before = sorted(panes(s["herdr"], s["full"]))
+    out = json.loads(confirm(s).stdout)
+    assert out["close"] == "not_attempted" and out["source_closed"] is False
+    assert "no source pane" in out["reason"]
+    assert sorted(panes(s["herdr"], s["full"])) == before
