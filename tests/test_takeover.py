@@ -586,7 +586,6 @@ def _source_pane(herdr, full, cwd):
 
 
 @pytest.mark.integration
-@pytest.mark.integration
 def test_takeover_records_its_close_options(live_herdr_server, tmp_path):
     env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
     full = {**os.environ, **env}
@@ -602,7 +601,6 @@ def test_takeover_records_its_close_options(live_herdr_server, tmp_path):
         "source_exit_keys": ["Enter"], "source_exit_timeout": 30.0}
 
 
-@pytest.mark.integration
 @pytest.mark.integration
 def test_a_takeover_rerun_without_keep_source_overwrites_the_recorded_option(live_herdr_server, tmp_path):
     env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
