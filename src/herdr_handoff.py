@@ -1035,6 +1035,8 @@ class HandoffStore:
             package["target"] = {**(package.get("target") or {}), **ids}
             package["schema_version"] = 2
         block = dict(validate_takeover(package.get("takeover")) or {})
+        if block.get("source_closed_at") and changes.get("phase") == "confirmed":
+            changes = {k: v for k, v in changes.items() if k != "phase"}   # a closed source never goes back
         block = {**block, **changes}
         block.setdefault("version", 1)
         phase = block.get("phase")

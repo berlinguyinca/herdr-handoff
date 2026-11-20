@@ -9,7 +9,7 @@ import time
 import pytest
 
 from conftest import pushed_repo
-from herdr_handoff import HandoffStore
+from herdr_handoff import HandoffStore, build_handoff
 from test_source_worktree_guard import local_only_commit
 from test_source_exit import run_in
 from test_takeover import create, panes, run_cli, source_state, takeover_args
@@ -173,3 +173,18 @@ def test_a_late_confirm_without_a_recorded_source_pane_closes_nothing(herdr_serv
     assert out["close"] == "not_attempted" and out["source_closed"] is False
     assert "no source pane" in out["reason"]
     assert sorted(panes(s["herdr"], s["full"])) == before
+
+
+@pytest.mark.parametrize("closed_phase", ["source_closed", "already_closed"])
+def test_confirm_never_rewrites_the_phase_of_a_record_whose_source_is_closed(tmp_path, closed_phase):
+    # The race: a takeover closes the source after confirm's idempotency check and before confirm records
+    # "confirmed". Recording that on a closed record must leave the phase (and both stamps) alone.
+    store = HandoffStore(tmp_path / "root")
+    package = store.enqueue(build_handoff(goal="Goal", remaining=["r"]))
+    hid = package["handoff_id"]
+    closed = store.record_takeover(hid, {"phase": closed_phase, "child_pane": "w1:p2", "source_pane": "w1:p1"})
+    stamps = (closed["takeover"]["confirmed_at"], closed["takeover"]["source_closed_at"])
+    again = store.record_takeover(hid, {"phase": "confirmed", "child_pane": "w1:p2", "source_pane": "w1:p1",
+                                        "evidence": {"source": "successor pane", "pane": "w1:p2"}})["takeover"]
+    assert again["phase"] == closed_phase
+    assert (again["confirmed_at"], again["source_closed_at"]) == stamps
