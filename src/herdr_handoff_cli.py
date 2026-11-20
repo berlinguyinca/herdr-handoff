@@ -788,12 +788,49 @@ def confirm_takeover(store, handoff_id, *, pane=None):
     if recorded.get("source_closed_at"):
         return {"handoff_id": handoff_id, "phase": recorded["phase"], "pane_id": candidate,
                 "confirmed_at": recorded.get("confirmed_at"),
-                "source_closed_at": recorded["source_closed_at"], "idempotent": True}
+                "source_closed_at": recorded["source_closed_at"], "idempotent": True,
+                "close": _closed_kind(recorded), "source_closed": True, "reason": ""}
     block = store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": candidate,
                                                "source_pane": recorded.get("source_pane"),
                                                "evidence": {"source": "successor pane", "pane": candidate}})["takeover"]
+    close = _close_after_confirm(store, handoff_id, candidate)
+    block = close.get("block") or block
     return {"handoff_id": handoff_id, "phase": block["phase"], "pane_id": candidate,
-            "source_pane": block.get("source_pane"), "confirmed_at": block["confirmed_at"], "idempotent": False}
+            "source_pane": block.get("source_pane"), "confirmed_at": block["confirmed_at"], "idempotent": False,
+            "close": close["close"], "source_closed": close["source_closed"],
+            "source_closed_at": block.get("source_closed_at"), "reason": close["reason"]}
+
+
+def _closed_kind(block):
+    return "already_closed" if block.get("phase") == "already_closed" else "source_closed"
+
+
+def _close_after_confirm(store, handoff_id, child_pane):
+    """Close the source a takeover gave up waiting on, under the same gate; never blocks on a running takeover."""
+    def outcome(close, reason="", block=None):
+        return {"close": close, "source_closed": close in ("source_closed", "already_closed"),
+                "reason": reason, "block": block}
+
+    try:
+        with store.takeover_lock(handoff_id, wait=0):
+            block = validate_takeover(store.get(handoff_id).get("takeover")) or {}
+            if block.get("source_closed_at"):
+                return outcome(_closed_kind(block), block=block)
+            options = block.get("close_options")
+            if not options:
+                return outcome("not_attempted", "recorded by a takeover that predates confirm-side close", block)
+            if options.get("keep_source"):
+                return outcome("not_attempted", "takeover was run with --keep-source", block)
+            if not block.get("source_pane"):
+                return outcome("not_attempted", "no source pane is recorded", block)
+            closed = _close_source(store, handoff_id, block=block, source_pane=block["source_pane"],
+                                   child_pane=child_pane, tab_id=block.get("tab_id"),
+                                   placement=block.get("placement"), options=options)
+            if closed["status"] == "source_closed":
+                return outcome(_closed_kind(closed["block"]), block=closed["block"])
+            return outcome("refused", closed["reason"], store.get(handoff_id).get("takeover"))
+    except TakeoverInProgress:
+        return outcome("not_attempted", "a takeover of this handoff is running; it closes the source")
 
 
 def _sync_after_start(store, handoff_id, control_url, token):
