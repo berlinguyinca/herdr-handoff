@@ -572,7 +572,8 @@ def test_the_takeover_block_accepts_close_options():
 
 def test_the_takeover_block_rejects_bad_close_options():
     for bad in ("x", {**_CLOSE_OPTIONS, "force": True}, {**_CLOSE_OPTIONS, "keep_source": "yes"},
-                {**_CLOSE_OPTIONS, "source_exit_keys": "Enter"}, {**_CLOSE_OPTIONS, "source_exit_timeout": "5"}):
+                {**_CLOSE_OPTIONS, "source_exit_keys": "Enter"}, {**_CLOSE_OPTIONS, "source_exit_timeout": "5"},
+                {**_CLOSE_OPTIONS, "source_exit_keys": None}, {**_CLOSE_OPTIONS, "source_exit_timeout": None}):
         with pytest.raises(ValueError):
             validate_takeover({"version": 1, "phase": "launched", "close_options": bad})
 

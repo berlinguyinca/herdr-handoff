@@ -687,12 +687,14 @@ def _validate_close_options(options):
     for key in ("source_cwd", "source_exit_text"):
         if options.get(key) is not None and not isinstance(options[key], str):
             raise ValueError(f"takeover close_options {key} must be a string or null")
-    keys = options.get("source_exit_keys")
-    if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) for k in keys)):
-        raise ValueError("takeover close_options source_exit_keys must be a list of strings")
-    timeout = options.get("source_exit_timeout")
-    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))):
-        raise ValueError("takeover close_options source_exit_timeout must be a number")
+    if "source_exit_keys" in options:       # the schema types both as array / number, so null is not accepted
+        keys = options["source_exit_keys"]
+        if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+            raise ValueError("takeover close_options source_exit_keys must be a list of strings")
+    if "source_exit_timeout" in options:
+        timeout = options["source_exit_timeout"]
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("takeover close_options source_exit_timeout must be a number")
 
 
 def validate_takeover(block):
