@@ -31,8 +31,8 @@ successor.
   `herdr-handoff resume <id>` works either way.
 - Order the steps so nothing can be lost: make the work durable (commit, push,
   upload artifacts, file issues), create the handoff, launch the successor with `takeover`, which closes
-  the source pane last, once herdr observes the successor (if the successor confirms after takeover gave up waiting, `confirm` closes it under the same checks). Once a pane
-  is closed its session cannot be
+  the source pane last, once herdr observes the successor (if the successor confirms after takeover gave up waiting,
+  `confirm` closes it under the same checks). Once a pane is closed its session cannot be
   recovered, so the close always comes last and always needs proof.
 - A close also needs the source *worktree* to hold nothing that exists only
   there. `takeover` refuses uncommitted tracked changes and commits no remote

@@ -36,7 +36,7 @@ once herdr observes the successor live (it runs `takeover`, so see below). Pass
 `--keep-source` to want both sessions side by side. The successor pane goes
 **below** the source by default (`--direction right` restores the old
 side-by-side split); this default changed from right to down on purpose in
-0.5.1. Without `HERDR_PANE_ID` it
+0.5.0. Without `HERDR_PANE_ID` it
 opens a tab (or workspace) in `--cwd`; without a running herdr it prints the
 exact command (`manual_launch_required`). It never starts a detached process,
 and it never closes anything without proof — a refusal leaves both panes up.
