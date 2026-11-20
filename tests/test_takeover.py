@@ -575,3 +575,45 @@ def test_the_takeover_block_rejects_bad_close_options():
                 {**_CLOSE_OPTIONS, "source_exit_keys": "Enter"}, {**_CLOSE_OPTIONS, "source_exit_timeout": "5"}):
         with pytest.raises(ValueError):
             validate_takeover({"version": 1, "phase": "launched", "close_options": bad})
+
+
+# --- integration: takeover records how it meant to close the source ----------------------------------
+
+def _source_pane(herdr, full, cwd):
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(cwd)], env=full,
+                                   capture_output=True, text=True).stdout)
+    return ws["result"]["root_pane"]["pane_id"]
+
+
+@pytest.mark.integration
+@pytest.mark.integration
+def test_takeover_records_its_close_options(live_herdr_server, tmp_path):
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    source = _source_pane(herdr, full, tmp_path)
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, tmp_path, "--keep-source",
+                                 "--source-exit-text", "/exit", "--source-exit-key", "Enter"),
+                   env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert source_state(root, package["handoff_id"])["takeover"]["close_options"] == {
+        "keep_source": True, "allow_dirty": False, "source_cwd": None, "source_exit_text": "/exit",
+        "source_exit_keys": ["Enter"], "source_exit_timeout": 30.0}
+
+
+@pytest.mark.integration
+@pytest.mark.integration
+def test_a_takeover_rerun_without_keep_source_overwrites_the_recorded_option(live_herdr_server, tmp_path):
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    source = _source_pane(herdr, full, tmp_path)
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    run_env = {**env, "HERDR_PANE_ID": source}
+    first = run_cli(takeover_args(root, package["handoff_id"], source, tmp_path, "--keep-source"), env=run_env)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert source_state(root, package["handoff_id"])["takeover"]["close_options"]["keep_source"] is True
+    second = run_cli(takeover_args(root, package["handoff_id"], source, tmp_path), env=run_env)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert source_state(root, package["handoff_id"])["takeover"]["close_options"]["keep_source"] is False
