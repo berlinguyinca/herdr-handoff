@@ -619,12 +619,13 @@ def compact_prompt(handoff_id, *, confirm=False):
             "binding.")
     if confirm:
         text += (" Once herdr observes this pane running you, its takeover closes the pane you replaced, unless the "
-                 f"close is refused; `herdr-handoff confirm {handoff_id}` is an optional acknowledgement, safe to repeat.")
+                 f"close is refused; if takeover gave up, `herdr-handoff confirm {handoff_id}` closes it; safe to "
+                 "repeat.")
     return text
 
 
 def takeover_prompt(handoff_id, document, *, root=None):
-    """One-line prompt for a takeover: read the document, with `confirm` as an optional acknowledgement.
+    """One-line prompt for a takeover: read the document, then `confirm`, which closes the source if takeover gave up.
 
     With no ``root`` the confirm command carries no path at all, which is what the launched pane is
     told to run: every byte of a typed command counts against what herdr can deliver, and the pane can
@@ -633,7 +634,7 @@ def takeover_prompt(handoff_id, document, *, root=None):
     command = (f"herdr-handoff --root {shlex.quote(str(root))} confirm {handoff_id}" if root
                else f"herdr-handoff confirm {handoff_id}")
     return (f"{short_prompt(handoff_id, document)} Once herdr observes this pane running you, its takeover closes "
-            f"the pane you replaced, unless the close is refused; `{command}` is an optional acknowledgement, "
+            f"the pane you replaced, unless the close is refused; if takeover gave up, `{command}` closes it; "
             "safe to repeat.")
 
 
@@ -1215,10 +1216,11 @@ class HandoffStore:
         ``HERDR_HANDOFF_FILE``), so the full command - the one that works from any shell, in any cwd -
         belongs here, in the document the successor has to read anyway.
         """
-        return ("\n## Acknowledging this handoff (optional)\n\n"
+        return ("\n## Confirming this handoff\n\n"
                 "herdr observes this pane itself and closes the pane this handoff replaced once it sees you "
-                "running.  Nothing waits on the command below; it is an optional acknowledgement and is safe "
-                "to run again:\n\n"
+                "running.  Run the command below once you have the Resume point: it records the confirmation "
+                "and, if takeover gave up waiting before it saw you, closes the replaced pane under the same "
+                "checks.  It is safe to run again:\n\n"
                 f"```sh\nherdr-handoff --root {shlex.quote(str(self.root.resolve()))} confirm {handoff_id}\n```\n")
 
     @staticmethod

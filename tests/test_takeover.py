@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from conftest import pushed_repo, wait_for_json
-from herdr_handoff import (TAKEOVER_PHASES, HandoffStore, build_handoff, build_launch_plan,
+from herdr_handoff import (TAKEOVER_PHASES, HandoffStore, build_handoff, build_launch_plan, compact_prompt,
                            decide_takeover_close, short_prompt, takeover_prompt, validate_envelope,
                            validate_takeover,
                            _handoff_root)
@@ -112,7 +112,18 @@ def test_the_document_spells_out_the_confirm_command_with_the_real_root(tmp_path
     package["handoff_id"] = ID
     document = store.write_document(package).read_text()
     assert f"herdr-handoff --root {tmp_path / 'handoffs'} confirm {ID}" in document
-    assert "optional acknowledgement" in document
+    # once takeover stops waiting, confirm is what closes the source pane: never call it optional
+    assert "optional" not in document.lower()
+    assert "Nothing waits on" not in document
+    assert "takeover gave up" in document
+
+
+def test_no_successor_prompt_calls_confirm_optional(tmp_path):
+    document = tmp_path / "documents" / f"{ID}.md"
+    for prompt in (takeover_prompt(ID, document), takeover_prompt(ID, document, root=tmp_path / "handoffs"),
+                   compact_prompt(ID, confirm=True)):
+        assert "optional" not in prompt
+        assert "takeover gave up" in prompt
 
 
 @pytest.mark.integration
