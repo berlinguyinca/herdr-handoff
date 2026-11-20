@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from conftest import pushed_repo, wait_for_json
-from herdr_handoff import (TAKEOVER_PHASES, HandoffStore, build_handoff, build_launch_plan,
+from herdr_handoff import (TAKEOVER_PHASES, HandoffStore, build_handoff, build_launch_plan, compact_prompt,
                            decide_takeover_close, short_prompt, takeover_prompt, validate_envelope,
                            validate_takeover,
                            _handoff_root)
@@ -112,7 +112,18 @@ def test_the_document_spells_out_the_confirm_command_with_the_real_root(tmp_path
     package["handoff_id"] = ID
     document = store.write_document(package).read_text()
     assert f"herdr-handoff --root {tmp_path / 'handoffs'} confirm {ID}" in document
-    assert "optional acknowledgement" in document
+    # once takeover stops waiting, confirm is what closes the source pane: never call it optional
+    assert "optional" not in document.lower()
+    assert "Nothing waits on" not in document
+    assert "takeover gave up" in document
+
+
+def test_no_successor_prompt_calls_confirm_optional(tmp_path):
+    document = tmp_path / "documents" / f"{ID}.md"
+    for prompt in (takeover_prompt(ID, document), takeover_prompt(ID, document, root=tmp_path / "handoffs"),
+                   compact_prompt(ID, confirm=True)):
+        assert "optional" not in prompt
+        assert "takeover gave up" in prompt
 
 
 @pytest.mark.integration
@@ -557,3 +568,62 @@ def test_takeover_splits_below_by_default_and_leaves_it_out_of_the_record(live_h
         [herdr, "pane", "list"], env=full, capture_output=True, text=True).stdout)["result"]["panes"]}
     child = json.loads(done.stdout)["pane_id"]
     assert shown[child].get("tab_id") == shown[source].get("tab_id")
+
+
+_CLOSE_OPTIONS = {"keep_source": False, "allow_dirty": True, "source_cwd": "/work/repo",
+                  "source_exit_text": "/exit", "source_exit_keys": ["Enter"], "source_exit_timeout": 5.0}
+
+
+def test_the_takeover_block_accepts_close_options():
+    block = {"version": 1, "phase": "launched", "close_options": dict(_CLOSE_OPTIONS)}
+    assert validate_takeover(block)["close_options"] == _CLOSE_OPTIONS
+    nulls = dict(_CLOSE_OPTIONS, source_cwd=None, source_exit_text=None, source_exit_keys=[])
+    assert validate_takeover({"version": 1, "phase": "launched", "close_options": nulls})
+
+
+def test_the_takeover_block_rejects_bad_close_options():
+    for bad in ("x", {**_CLOSE_OPTIONS, "force": True}, {**_CLOSE_OPTIONS, "keep_source": "yes"},
+                {**_CLOSE_OPTIONS, "source_exit_keys": "Enter"}, {**_CLOSE_OPTIONS, "source_exit_timeout": "5"},
+                {**_CLOSE_OPTIONS, "source_exit_keys": None}, {**_CLOSE_OPTIONS, "source_exit_timeout": None}):
+        with pytest.raises(ValueError):
+            validate_takeover({"version": 1, "phase": "launched", "close_options": bad})
+
+
+# --- integration: takeover records how it meant to close the source ----------------------------------
+
+def _source_pane(herdr, full, cwd):
+    ws = json.loads(subprocess.run([herdr, "workspace", "create", "--cwd", str(cwd)], env=full,
+                                   capture_output=True, text=True).stdout)
+    return ws["result"]["root_pane"]["pane_id"]
+
+
+@pytest.mark.integration
+def test_takeover_records_its_close_options(live_herdr_server, tmp_path):
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    source = _source_pane(herdr, full, tmp_path)
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    done = run_cli(takeover_args(root, package["handoff_id"], source, tmp_path, "--keep-source",
+                                 "--source-exit-text", "/exit", "--source-exit-key", "Enter"),
+                   env={**env, "HERDR_PANE_ID": source})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert source_state(root, package["handoff_id"])["takeover"]["close_options"] == {
+        "keep_source": True, "allow_dirty": False, "source_cwd": None, "source_exit_text": "/exit",
+        "source_exit_keys": ["Enter"], "source_exit_timeout": 30.0}
+
+
+@pytest.mark.integration
+def test_a_takeover_rerun_without_keep_source_overwrites_the_recorded_option(live_herdr_server, tmp_path):
+    env, herdr = live_herdr_server["env"], live_herdr_server["herdr"]
+    full = {**os.environ, **env}
+    source = _source_pane(herdr, full, tmp_path)
+    root = tmp_path / "root"
+    package = create(root, env=env)
+    run_env = {**env, "HERDR_PANE_ID": source}
+    first = run_cli(takeover_args(root, package["handoff_id"], source, tmp_path, "--keep-source"), env=run_env)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert source_state(root, package["handoff_id"])["takeover"]["close_options"]["keep_source"] is True
+    second = run_cli(takeover_args(root, package["handoff_id"], source, tmp_path), env=run_env)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert source_state(root, package["handoff_id"])["takeover"]["close_options"]["keep_source"] is False

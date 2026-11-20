@@ -646,8 +646,13 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
                              fallback_prompt=compact_prompt(handoff_id, confirm=True),
                              harness_binary=_harness_binary(harness), direction=direction)
     label = f"to-{harness}-{handoff_id[-8:]}"
+    # how this run means to close the source, kept so a later `confirm` can finish the close it was too late for
+    close_options = {"keep_source": bool(keep_source), "allow_dirty": bool(allow_dirty), "source_cwd": source_cwd,
+                     "source_exit_text": source_exit_text, "source_exit_keys": list(source_exit_keys),
+                     "source_exit_timeout": float(source_exit_timeout)}
     if child:
         pane, placement, tab_id = child, recorded.get("placement") or "split", recorded.get("tab_id")
+        store.record_takeover(handoff_id, {"close_options": close_options})
         if _pane_tab(pane) is None:
             store.record_takeover(handoff_id, {"phase": "unconfirmed", "reason": "successor pane is gone"})
             return {"handoff_id": handoff_id, "target_harness": harness, "status": "launch_unconfirmed",
@@ -676,7 +681,8 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
         tab_id = _pane_tab(pane) or (result.get("tab_id") or (result.get("root_pane") or {}).get("tab_id"))
         store.record_takeover(handoff_id, {"phase": "launched", "source_pane": source_pane, "child_pane": pane,
                                            "tab_id": tab_id if isinstance(tab_id, str) else None,
-                                           "placement": placement, "reason": None})
+                                           "placement": placement, "reason": None,
+                                           "close_options": close_options})
         for state in ("claimed", "accepted", "in_progress"):
             store.transition(handoff_id, state, actor="local-takeover")
 
@@ -707,6 +713,28 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
     if keep_source:
         return report("confirmed", block=block, source_closed=False)
 
+    closing = _close_source(store, handoff_id, block=block, source_pane=source_pane, child_pane=pane,
+                            tab_id=tab_id, placement=placement, options=close_options)
+    return report(closing["status"], block=closing["block"], source_closed=closing["source_closed"],
+                  reason=closing["reason"], **({"worktree": closing["worktree"]} if closing["worktree"] else {}))
+
+
+def _close_source(store, handoff_id, *, block, source_pane, child_pane, tab_id, placement, options):
+    """Close the source pane of a confirmed takeover, unless the worktree guard or the exit step says no.
+
+    Everything comes from the arguments, so `confirm` can run it from the options a takeover recorded.
+    Returns the status, whether the pane is closed, the reason, the record's block and the worktree guard.
+    """
+    pane = child_pane
+    source_cwd, allow_dirty = options.get("source_cwd"), options.get("allow_dirty")
+    source_exit_text = options.get("source_exit_text")
+    source_exit_keys = options.get("source_exit_keys") or ()
+    source_exit_timeout = options.get("source_exit_timeout", 30.0)
+
+    def result(status, block, source_closed, reason="", worktree=None):
+        return {"status": status, "source_closed": source_closed, "reason": reason, "block": block,
+                "worktree": worktree}
+
     source_tab = _pane_tab(source_pane) if source_pane else None
     guard, override = None, {}
     if source_pane and source_tab is None:  # the session being replaced is already gone: nothing to close
@@ -725,25 +753,24 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
             store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": reason,
                                                "evidence": {**(block.get("evidence") or {}),
                                                             "worktree": guard}})
-            return report(status, block=block, source_closed=False, reason=reason, worktree=guard)
+            return result(status, block, False, reason, guard)
         if (source_exit_text or source_exit_keys) and not exit_source(
                 source_pane, text=source_exit_text, keys=source_exit_keys, timeout=source_exit_timeout):
             reason = "the source harness did not exit after the exit command; its pane was left open"
             store.record_takeover(handoff_id, {"phase": "source_exit_failed", "child_pane": pane, "reason": reason,
                                                "evidence": {**(block.get("evidence") or {}),
                                                             "source_exit": _source_evidence(source_pane)}})
-            return report("source_exit_failed", block=block, source_closed=False, reason=reason, worktree=guard)
+            return result("source_exit_failed", block, False, reason, guard)
         if allow_dirty and worktree_close_refusal(guard):
             override = {"dirty_allowed": True, "unpushed_commits": unpushed_commits(guard.get("path"))}
         closed = close_pane(source_pane)
         if not closed["closed"]:
             store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": closed["reason"]})
-            return report("source_close_failed", block=block, source_closed=False, reason=closed["reason"])
+            return result("source_close_failed", block, False, closed["reason"])
     block = store.record_takeover(handoff_id, {"phase": "already_closed" if closed["already"] else "source_closed",
                                                 "child_pane": pane, "reason": closed["reason"] or None,
                                                 **override})["takeover"]
-    return report("source_closed", block=block, source_closed=True, reason=closed["reason"],
-                  **({"worktree": guard} if guard else {}))
+    return result("source_closed", block, True, closed["reason"], guard)
 
 
 def confirm_takeover(store, handoff_id, *, pane=None):
@@ -761,12 +788,49 @@ def confirm_takeover(store, handoff_id, *, pane=None):
     if recorded.get("source_closed_at"):
         return {"handoff_id": handoff_id, "phase": recorded["phase"], "pane_id": candidate,
                 "confirmed_at": recorded.get("confirmed_at"),
-                "source_closed_at": recorded["source_closed_at"], "idempotent": True}
+                "source_closed_at": recorded["source_closed_at"], "idempotent": True,
+                "close": _closed_kind(recorded), "source_closed": True, "reason": ""}
     block = store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": candidate,
                                                "source_pane": recorded.get("source_pane"),
                                                "evidence": {"source": "successor pane", "pane": candidate}})["takeover"]
+    close = _close_after_confirm(store, handoff_id, candidate)
+    block = close.get("block") or block
     return {"handoff_id": handoff_id, "phase": block["phase"], "pane_id": candidate,
-            "source_pane": block.get("source_pane"), "confirmed_at": block["confirmed_at"], "idempotent": False}
+            "source_pane": block.get("source_pane"), "confirmed_at": block["confirmed_at"], "idempotent": False,
+            "close": close["close"], "source_closed": close["source_closed"],
+            "source_closed_at": block.get("source_closed_at"), "reason": close["reason"]}
+
+
+def _closed_kind(block):
+    return "already_closed" if block.get("phase") == "already_closed" else "source_closed"
+
+
+def _close_after_confirm(store, handoff_id, child_pane):
+    """Close the source a takeover gave up waiting on, under the same gate; never blocks on a running takeover."""
+    def outcome(close, reason="", block=None):
+        return {"close": close, "source_closed": close in ("source_closed", "already_closed"),
+                "reason": reason, "block": block}
+
+    try:
+        with store.takeover_lock(handoff_id, wait=0):
+            block = validate_takeover(store.get(handoff_id).get("takeover")) or {}
+            if block.get("source_closed_at"):
+                return outcome(_closed_kind(block), block=block)
+            options = block.get("close_options")
+            if not options:
+                return outcome("not_attempted", "recorded by a takeover that predates confirm-side close", block)
+            if options.get("keep_source"):
+                return outcome("not_attempted", "takeover was run with --keep-source", block)
+            if not block.get("source_pane"):
+                return outcome("not_attempted", "no source pane is recorded", block)
+            closed = _close_source(store, handoff_id, block=block, source_pane=block["source_pane"],
+                                   child_pane=child_pane, tab_id=block.get("tab_id"),
+                                   placement=block.get("placement"), options=options)
+            if closed["status"] == "source_closed":
+                return outcome(_closed_kind(closed["block"]), block=closed["block"])
+            return outcome("refused", closed["reason"], store.get(handoff_id).get("takeover"))
+    except TakeoverInProgress:
+        return outcome("not_attempted", "a takeover of this handoff is running; it closes the source")
 
 
 def _sync_after_start(store, handoff_id, control_url, token):
@@ -906,7 +970,16 @@ def main(argv=None):
                                  help="key pressed in the source pane after the text, e.g. Enter (repeatable)")
     takeover_parser.add_argument("--source-exit-timeout", type=float, default=30.0,
                                  help="seconds to wait for the source harness to exit before refusing to close")
-    confirm_parser = sub.add_parser("confirm")
+    confirm_parser = sub.add_parser(
+        "confirm", help="record the successor's acknowledgement; closes the source pane a takeover gave up waiting on",
+        description="Run from the successor pane. Records the confirmation, then closes the source pane if "
+                    "takeover stopped waiting before the successor confirmed, under the same checks as takeover "
+                    "(unpushed commits, a dirty worktree or another tab refuse). It never closes after "
+                    "--keep-source, for a record written by takeover 0.5.0, or while a takeover is running. "
+                    "The JSON carries close (source_closed, already_closed, refused or not_attempted), "
+                    "source_closed, reason and source_closed_at; exit is 0 whenever the confirmation is recorded. "
+                    "A repeated confirm retries a close that failed earlier, and it can wait up to the "
+                    "source-exit timeout while the source harness exits.")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
     args = parser.parse_args(argv)

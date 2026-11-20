@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 _SECRET = re.compile(
     r"(?i)(bearer\s+|token\s*[=:]\s*|password\s*[=:]\s*|secret\s*[=:]\s*|api[_-]?key\s*[=:]\s*)[^\s,;]+"
@@ -619,12 +619,13 @@ def compact_prompt(handoff_id, *, confirm=False):
             "binding.")
     if confirm:
         text += (" Once herdr observes this pane running you, its takeover closes the pane you replaced, unless the "
-                 f"close is refused; `herdr-handoff confirm {handoff_id}` is an optional acknowledgement, safe to repeat.")
+                 f"close is refused; if takeover gave up, `herdr-handoff confirm {handoff_id}` closes it; safe to "
+                 "repeat.")
     return text
 
 
 def takeover_prompt(handoff_id, document, *, root=None):
-    """One-line prompt for a takeover: read the document, with `confirm` as an optional acknowledgement.
+    """One-line prompt for a takeover: read the document, then `confirm`, which closes the source if takeover gave up.
 
     With no ``root`` the confirm command carries no path at all, which is what the launched pane is
     told to run: every byte of a typed command counts against what herdr can deliver, and the pane can
@@ -633,7 +634,7 @@ def takeover_prompt(handoff_id, document, *, root=None):
     command = (f"herdr-handoff --root {shlex.quote(str(root))} confirm {handoff_id}" if root
                else f"herdr-handoff confirm {handoff_id}")
     return (f"{short_prompt(handoff_id, document)} Once herdr observes this pane running you, its takeover closes "
-            f"the pane you replaced, unless the close is refused; `{command}` is an optional acknowledgement, "
+            f"the pane you replaced, unless the close is refused; if takeover gave up, `{command}` closes it; "
             "safe to repeat.")
 
 
@@ -665,11 +666,36 @@ def _handoff_root(handoff_file):
 
 _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
                             "source_closed_at", "reason", "evidence", "direction", "dirty_allowed",
-                            "unpushed_commits"})
+                            "unpushed_commits", "close_options"})
+_CLOSE_OPTION_KEYS = frozenset({"keep_source", "allow_dirty", "source_cwd", "source_exit_text",
+                                "source_exit_keys", "source_exit_timeout"})
 _TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")
 _TAKEOVER_STAMPS = ("confirmed_at", "source_closed_at")
 _PLACEMENTS = frozenset({"split", "tab", "workspace"})
 DIRECTIONS = frozenset({"down", "right"})
+
+
+def _validate_close_options(options):
+    """The close flags a later `confirm` needs, recorded at takeover time."""
+    if not isinstance(options, dict):
+        raise ValueError("takeover close_options must be an object")
+    unknown = sorted(set(options) - _CLOSE_OPTION_KEYS)
+    if unknown:
+        raise ValueError(f"takeover close_options has unsupported keys: {', '.join(unknown)}")
+    for key in ("keep_source", "allow_dirty"):
+        if key in options and not isinstance(options[key], bool):
+            raise ValueError(f"takeover close_options {key} must be a boolean")
+    for key in ("source_cwd", "source_exit_text"):
+        if options.get(key) is not None and not isinstance(options[key], str):
+            raise ValueError(f"takeover close_options {key} must be a string or null")
+    if "source_exit_keys" in options:       # the schema types both as array / number, so null is not accepted
+        keys = options["source_exit_keys"]
+        if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+            raise ValueError("takeover close_options source_exit_keys must be a list of strings")
+    if "source_exit_timeout" in options:
+        timeout = options["source_exit_timeout"]
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("takeover close_options source_exit_timeout must be a number")
 
 
 def validate_takeover(block):
@@ -710,6 +736,8 @@ def validate_takeover(block):
     shas = block.get("unpushed_commits")
     if shas is not None and (not isinstance(shas, list) or not all(isinstance(sha, str) and sha for sha in shas)):
         raise ValueError("takeover unpushed_commits must be a list of commit ids")
+    if block.get("close_options") is not None:
+        _validate_close_options(block["close_options"])
     return block
 
 
@@ -1008,6 +1036,8 @@ class HandoffStore:
             package["target"] = {**(package.get("target") or {}), **ids}
             package["schema_version"] = 2
         block = dict(validate_takeover(package.get("takeover")) or {})
+        if block.get("source_closed_at") and changes.get("phase") == "confirmed":
+            changes = {k: v for k, v in changes.items() if k != "phase"}   # a closed source never goes back
         block = {**block, **changes}
         block.setdefault("version", 1)
         phase = block.get("phase")
@@ -1186,10 +1216,11 @@ class HandoffStore:
         ``HERDR_HANDOFF_FILE``), so the full command - the one that works from any shell, in any cwd -
         belongs here, in the document the successor has to read anyway.
         """
-        return ("\n## Acknowledging this handoff (optional)\n\n"
+        return ("\n## Confirming this handoff\n\n"
                 "herdr observes this pane itself and closes the pane this handoff replaced once it sees you "
-                "running.  Nothing waits on the command below; it is an optional acknowledgement and is safe "
-                "to run again:\n\n"
+                "running.  Run the command below once you have the Resume point: it records the confirmation "
+                "and, if takeover gave up waiting before it saw you, closes the replaced pane under the same "
+                "checks.  It is safe to run again:\n\n"
                 f"```sh\nherdr-handoff --root {shlex.quote(str(self.root.resolve()))} confirm {handoff_id}\n```\n")
 
     @staticmethod

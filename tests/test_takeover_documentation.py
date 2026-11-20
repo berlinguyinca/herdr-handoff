@@ -95,4 +95,18 @@ def test_generated_text_never_makes_confirm_the_condition_for_closing(tmp_path):
         flat = " ".join(text.split())
         assert not re.search(r"(?i)can be closed|stays open on purpose|so the pane you replaced", flat), name
         if "confirm" in flat:
-            assert "optional" in flat and "herdr observes" in flat, name
+            # herdr closes the source itself; confirm only closes it once takeover gave up, and is never "optional"
+            assert "takeover gave up" in flat and "herdr observes" in flat, name
+            assert "optional" not in flat, name
+
+
+def test_the_skill_says_confirm_closes_a_late_confirmed_source():
+    text = _text("skill/herdr-handoff/SKILL.md")
+    assert "confirm" in text and "closes the source pane" in text
+    assert "the close does not wait for it" not in text
+
+
+def test_confirm_help_names_the_close():
+    done = subprocess.run([sys.executable, str(CLI), "confirm", "--help"], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert "close" in done.stdout

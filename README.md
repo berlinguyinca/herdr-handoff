@@ -165,7 +165,7 @@ directory is not a git repository), so the successor knows what exists only loca
 So order a handoff this way, and nothing can be lost: make the work durable
 (commit, push, upload artifacts, file issues), create the handoff, launch the
 successor with `takeover`, which closes the source pane last, once herdr observes the successor (`confirm` is
-an optional acknowledgement, not a step the close waits for).
+not a step the close waits for; if takeover gave up waiting, a later `confirm` closes the source pane).
 
 herdr observes the successor: the harness agent is detected in the child pane in a settled
 state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) other than as an
@@ -173,8 +173,12 @@ echo of the command the launcher typed. The shell echoes that command back with 
 surrounding text matches the typed command (behind a prompt, redrawn, wrapped over rows, or boxed with a
 border on every row) does not count; the comparison uses letters and digits only. Neither does a bare id
 alone or a bare quote of the prompt; the successor's own words around the id do. The close never waits for
-the successor to run anything. `herdr-handoff confirm HANDOFF_ID` stays as an optional, idempotent record of
-the successor's own acknowledgement (it stamps the successor's pane and `confirmed_at`). The handoff
+the successor to run anything. `herdr-handoff confirm HANDOFF_ID` is idempotent. It records the
+successor's own acknowledgement (it stamps the successor's pane and `confirmed_at`) and, if takeover gave up
+waiting first, closes the source pane under the same checks takeover uses (never after `--keep-source`, for a
+0.5.0 record, or while a takeover runs); its JSON reports `close`, `source_closed`, `reason` and
+`source_closed_at`, and it exits 0 whenever the confirmation is recorded. A repeated `confirm` retries a close that failed earlier, and
+`confirm` can wait up to the source-exit timeout for the source harness to exit. The handoff
 document spells the command out with the absolute root, and a pane started by a
 handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works
 there. Every step is recorded in the package's `takeover` block (`launching` →
