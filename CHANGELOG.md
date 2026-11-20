@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1 - 2026-11-19
+
+### Fixed
+- `confirm` now closes the source pane when `takeover` gave up waiting (its `--confirm-timeout`) and the successor
+  confirms afterwards, so a slow successor no longer leaves the old pane open. It takes the takeover lock without
+  waiting and closes through the same checks as `takeover` (unpushed commits, a dirty worktree or another tab
+  refuse). It never closes after `--keep-source`, for a record written by takeover 0.5.0 (no recorded close
+  options), with no source pane recorded, or while a takeover holds the lock. The JSON gains `close`
+  (`source_closed`, `already_closed`, `refused` or `not_attempted`), `source_closed`, `reason` and
+  `source_closed_at`; `confirm` exits 0 whenever the confirmation is recorded, whether or not the pane closed.
+
 ## 0.5.0 - 2026-11-18
 
 ### Changed

@@ -970,7 +970,14 @@ def main(argv=None):
                                  help="key pressed in the source pane after the text, e.g. Enter (repeatable)")
     takeover_parser.add_argument("--source-exit-timeout", type=float, default=30.0,
                                  help="seconds to wait for the source harness to exit before refusing to close")
-    confirm_parser = sub.add_parser("confirm")
+    confirm_parser = sub.add_parser(
+        "confirm", help="record the successor's acknowledgement; closes the source pane a takeover gave up waiting on",
+        description="Run from the successor pane. Records the confirmation, then closes the source pane if "
+                    "takeover stopped waiting before the successor confirmed, under the same checks as takeover "
+                    "(unpushed commits, a dirty worktree or another tab refuse). It never closes after "
+                    "--keep-source, for a record written by takeover 0.5.0, or while a takeover is running. "
+                    "The JSON carries close (source_closed, already_closed, refused or not_attempted), "
+                    "source_closed, reason and source_closed_at; exit is 0 whenever the confirmation is recorded.")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
     args = parser.parse_args(argv)

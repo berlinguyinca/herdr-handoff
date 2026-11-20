@@ -174,7 +174,7 @@ def test_with_a_pane_it_still_splits_that_pane(herdr_server, tmp_path):
 
 def test_version_and_takeover_help_list_direction_and_exit_flags():
     version = run_cli(["--version"])
-    assert version.returncode == 0 and "0.5.0" in version.stdout + version.stderr
+    assert version.returncode == 0 and "0.5.1" in version.stdout + version.stderr
     helped = run_cli(["takeover", "--help"])
     assert helped.returncode == 0
     for flag in ("--direction", "--source-exit-text", "--source-exit-key", "--source-exit-timeout"):
