@@ -128,3 +128,34 @@ def test_json_schema_matches_the_builder_when_jsonschema_is_available():
     bad["context"]["constraints"] = "x"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(bad, schema)
+
+
+def test_json_schema_takeover_direction_matches_the_validator():
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads((Path(__file__).parents[1] / "schemas" / "handoff-v2.schema.json").read_text())
+    package = build_handoff(goal="g")
+    for direction in ("down", "right"):
+        package["takeover"] = {"version": 1, "phase": "launched", "direction": direction}
+        validate_envelope(package)
+        jsonschema.validate(package, schema)
+    package["takeover"] = {"version": 1, "phase": "launched", "direction": "up"}
+    with pytest.raises(ValueError):
+        validate_envelope(package)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(package, schema)
+
+
+def test_json_schema_takeover_close_options_match_the_validator():
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads((Path(__file__).parents[1] / "schemas" / "handoff-v2.schema.json").read_text())
+    package = build_handoff(goal="g")
+    package["takeover"] = {"version": 1, "phase": "launched", "close_options": {
+        "keep_source": False, "allow_dirty": False, "source_cwd": None, "source_exit_text": "/exit",
+        "source_exit_keys": ["Enter"], "source_exit_timeout": 5.0}}
+    validate_envelope(package)
+    jsonschema.validate(package, schema)
+    package["takeover"]["close_options"]["force"] = True
+    with pytest.raises(ValueError):
+        validate_envelope(package)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(package, schema)

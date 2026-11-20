@@ -30,8 +30,9 @@ def _recorder(bindir: Path, name: str, *, alive: bool = False) -> None:
         "'handoff_file': os.environ.get('HERDR_HANDOFF_FILE')}))\n"
     )
     if alive:
-        body += "print(%r, flush=True); print(sys.argv[1:], flush=True); __import__('time').sleep(300)\n" % (
-            f"{name}-ready",)
+        body += ("print(%r, flush=True); print(sys.argv[1:], flush=True); "
+                 "print('resumed handoff', os.environ.get('HERDR_HANDOFF_ID'), flush=True); "
+                 "__import__('time').sleep(300)\n" % (f"{name}-ready",))
     path.write_text("#!/usr/bin/env python3\n" + body)
     path.chmod(0o755)   # owner+group+other execute: `| stat.S_IEXEC` leaves the owner unable to run it
 

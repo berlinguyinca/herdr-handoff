@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import json
 import os
 import re
@@ -12,10 +14,13 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-from herdr_handoff import (HandoffStore, pane_label, __version__, build_handoff, build_launch_plan, build_memory_context,
-                            compact_prompt, decide_takeover_close, resolve_memory_refs, resume_prompt,
-                            running_subagents, short_prompt, source_worktree_state, takeover_prompt, validate_takeover, _handoff_root)
+from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, TakeoverInProgress, __version__, pane_label,
+                            build_handoff, build_launch_plan, build_memory_context, compact_prompt,
+                            decide_takeover_close, resolve_memory_refs, resume_prompt, running_subagents,
+                            shared_store_root, short_prompt, source_worktree_state, takeover_prompt,
+                            unpushed_commits, worktree_close_refusal, validate_takeover, _handoff_root)
 
 
 def _run(argv, *, capture=True):
@@ -73,16 +78,72 @@ def _announce_pane(pane, *, label, harness, handoff_id):
 
 
 def _default_root():
-    """Where the outbox lives, for a process that was started by a handoff rather than by a human.
+    """The outbox root and whether it is the shared store, for a process given no `--root`.
 
-    A successor pane is handed `herdr-handoff confirm <id>` with no path in it - the typed command has a
-    byte budget (herdr_handoff.MAX_TYPED_COMMAND) - so the root comes from HERDR_HANDOFF_FILE, which the
-    launch command exports, rather than from an argument.
+    Precedence: HERDR_HANDOFF_FILE (a successor pane is handed `herdr-handoff confirm <id>` with no path
+    in it - the typed command has a byte budget, herdr_handoff.MAX_TYPED_COMMAND - so the root comes from
+    the file the launch command exports), HERDR_HANDOFF_DIR, then the shared store (HERDR_HANDOFF_STORE,
+    else `~/.local/share/herdr-handoff/store`).  Only the shared store gets per-repo records imported.
     """
     derived = _handoff_root(os.environ.get("HERDR_HANDOFF_FILE", ""))
     if derived:
-        return derived
-    return os.environ.get("HERDR_HANDOFF_DIR", ".herdr/handoffs")
+        return derived, False
+    if os.environ.get("HERDR_HANDOFF_DIR"):
+        return os.environ["HERDR_HANDOFF_DIR"], False
+    return shared_store_root(os.environ), True
+
+
+def _legacy_root(cwd=None):
+    """The per-repo store older versions wrote: `<git toplevel, else cwd>/.herdr/handoffs`."""
+    cwd = cwd or os.getcwd()
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, text=True, capture_output=True)
+    base = top.stdout.strip() if top.returncode == 0 and top.stdout.strip() else cwd
+    return os.path.join(base, ".herdr", "handoffs")
+
+
+def _first_time(store, key):
+    """True the first time `key` is seen for this store; a marker file in the store remembers it.
+
+    A store that cannot hold the marker reports every time rather than never.
+    """
+    marker = store.root / ".notices" / hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()
+    if marker.exists():
+        return False
+    try:
+        marker.parent.mkdir(exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass
+    return True
+
+
+def _import_legacy_quietly(store):
+    """Bring the current repo's old records into the shared store; report on stderr, never on stdout.
+
+    The change of store is announced once per repo and each unreadable legacy record once, so a later
+    command in the same repo is silent.
+    """
+    legacy = Path(_legacy_root())
+    try:
+        imported = store.import_legacy(legacy)
+    except OSError as exc:
+        print(f"herdr-handoff: legacy import failed: {exc}", file=sys.stderr)
+        return
+    outbox = legacy / "outbox"
+    for name, reason in store.failed_legacy:             # reported every time, and no marker: it is retried
+        print(f"herdr-handoff: legacy import failed: {name}: {reason}", file=sys.stderr)
+    if (imported or store.skipped_legacy or any(outbox.glob("handoff_*.json"))) and not store.failed_legacy \
+            and _first_time(store, f"legacy:{legacy.resolve()}"):
+        print(f"herdr-handoff: handoffs are now kept in one shared store, {store.root}; this repo's "
+              f".herdr/handoffs is only read once, to import its records.  Use --root to choose another store.",
+              file=sys.stderr)
+    if imported:
+        print(f"herdr-handoff: imported {len(imported)} record(s) from this repo's .herdr/handoffs: "
+              + ", ".join(imported), file=sys.stderr)
+    for name, reason in store.skipped_legacy:
+        stamp = (outbox / name).stat().st_mtime_ns if (outbox / name).exists() else 0
+        if _first_time(store, f"corrupt:{legacy.resolve()}:{name}:{stamp}"):
+            print(f"herdr-handoff: skipped legacy record {name}: {reason}", file=sys.stderr)
 
 
 def _harness_binary(harness):
@@ -132,9 +193,11 @@ def launch(package, *, root, parent_pane, cwd=None, store=None):
 
 _CONFIRM_POLL_SECONDS = 0.5
 _CONFIRM_OUTPUT_TIMEOUT_MS = 1000
+_CONFIRM_SCROLLBACK_LINES = 200
 _CONFIRM_AGENT_WAIT_MS = 2000
 _TAKEOVER_REFUSAL_STATUSES = ("launch_unconfirmed", "launch_failed", "source_close_failed", "source_dirty",
-                              "subagents_running")
+                              "takeover_in_progress", "launch_state_unknown",
+                              "subagents_running", "source_exit_failed")
 
 _WORKTREE_REFUSAL_HINTS = {
     "worktree_dirty": "tracked changes are not committed",
@@ -209,10 +272,25 @@ def _agent_state(pane, *, wait_ms=None):
     return agent.get("agent"), agent.get("agent_status")
 
 
-def _wait_for_line(pane, text):
-    """A pane line herdr matched, or None within the short window."""
+def agent_session_of(reply):
+    """The harness session id in an `herdr agent get` reply, as herdr gave it (an id, or a session path)."""
+    agent = (reply.get("result") or {}).get("agent")
+    session = agent.get("agent_session") if isinstance(agent, dict) else None
+    value = session.get("value") if isinstance(session, dict) else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _agent_session(pane):
     try:
-        result = _herdr_json(["herdr", "pane", "wait-output", pane, "--match", text,
+        return agent_session_of(_herdr_json(["herdr", "agent", "get", pane]))
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return None
+
+
+def _wait_for_line(pane, text):
+    """A pane line herdr matched (unwrapped, scrollback included), or None within the short window."""
+    try:
+        result = _herdr_json(["herdr", "pane", "wait-output", pane, "--match", text, "--source", "recent-unwrapped",
                               "--timeout", str(_CONFIRM_OUTPUT_TIMEOUT_MS)]).get("result") or {}
     except (subprocess.CalledProcessError, ValueError, OSError):
         return None
@@ -220,19 +298,84 @@ def _wait_for_line(pane, text):
     return line if isinstance(line, str) else None
 
 
-def confirm_successor(pane, *, harness, handoff_id, timeout):
+def _read_recent(pane):
+    """The last `_CONFIRM_SCROLLBACK_LINES` rows of the pane, scrollback included ('' when unreadable)."""
+    try:
+        return _run(["herdr", "pane", "read", pane, "--source", "recent",
+                     "--lines", str(_CONFIRM_SCROLLBACK_LINES)]).stdout
+    except (subprocess.CalledProcessError, OSError):
+        return ""
+
+
+_OWN_WORDS = 8
+"""Letters and digits beside the id that are not the typed command, for them to count as the successor's own."""
+
+
+def id_outside_command(snapshot, handoff_id, typed_command):
+    """Text around an occurrence of `handoff_id` in `snapshot` that is the successor's, not the launch echo.
+
+    The launcher typed `typed_command` into the pane, so the shell echoes the id back inside it, and
+    that echo is not the successor speaking: behind a prompt, redrawn with other spacing or quoting,
+    wrapped over rows, inside a box whose border is drawn on every row.  So both sides are reduced to
+    ASCII letters and digits (rows joined), which drops all of that.  An occurrence of the id is the echo
+    when, going outward from it, the text matches the command until the command itself ends; it is proof
+    only when no spot of the command explains it, and at least `_OWN_WORDS` letters or digits next to it
+    stop matching before the command's edge and are not a piece of the command either.  A bare id has
+    none, and anything undecidable is not proof, as is a missing `typed_command`.  The text returned is the
+    reduced one around the id (underscores and punctuation are gone from it).
+    """
+    if not typed_command or not handoff_id:
+        return None
+    reduce = lambda text: re.sub(r"[^A-Za-z0-9]", "", text)  # noqa: E731
+    text, command, target = reduce(snapshot), reduce(typed_command), reduce(handoff_id)
+    if not target:
+        return None
+    width = len(target)
+    anchors = [m.start() for m in re.finditer(re.escape(target), command)]
+
+    def own_words(start, anchor):
+        left = 0
+        while left < min(start, anchor) and text[start - 1 - left] == command[anchor - 1 - left]:
+            left += 1
+        right = 0
+        while start + width + right < len(text) and anchor + width + right < len(command) \
+                and text[start + width + right] == command[anchor + width + right]:
+            right += 1
+        before = text[start - left - _OWN_WORDS:start - left] if left < anchor and start - left >= _OWN_WORDS else ""
+        end = start + width + right
+        after = text[end:end + _OWN_WORDS] if anchor + width + right < len(command) else ""
+        return any(len(side) == _OWN_WORDS and side not in command for side in (before, after))
+
+    for found in re.finditer(re.escape(target), text):
+        if not any(not own_words(found.start(), anchor) for anchor in anchors):
+            return text[max(0, found.start() - 60):found.end() + 60]
+    return None
+
+
+def _successor_spoke(pane, handoff_id, typed_command):
+    """Evidence that the id is in the pane's output other than in the command typed to start it, else None.
+
+    Read from the last `_CONFIRM_SCROLLBACK_LINES` rows of scrollback (a successor that printed the id and
+    then scrolled it off the screen has still printed it), never from one matched row: a row of a wrapped
+    echo has lost the context that shows it is an echo.
+    """
+    return id_outside_command(_read_recent(pane), handoff_id, typed_command)
+
+
+def confirm_successor(pane, *, harness, handoff_id, timeout, typed_command):
     """Wait for herdr to observe the successor: its agent detected, and its pane producing output.
 
     The launcher is not allowed to believe its own optimism here - both facts are read back from herdr
     about the pane it hosts.  Until both hold, the session being replaced stays open.  Neither fact is
     remembered between polls: a harness that boots and then dies is detected for a moment, and a pane
     whose process has left answers `agent_not_found`, so the proof has to hold at the moment of closing.
+    The id only counts when it is on a line that is not the typed launch command (`typed_command`).
     """
     deadline = time.monotonic() + max(0.0, float(timeout))
     evidence = {}
     while True:
         remaining = max(0.0, deadline - time.monotonic())
-        matched = _wait_for_line(pane, handoff_id)
+        matched = _successor_spoke(pane, handoff_id, typed_command)
         agent, status = _agent_state(pane, wait_ms=min(_CONFIRM_AGENT_WAIT_MS, max(200, int(remaining * 1000))))
         evidence = {"agent": agent, "agent_status": status,
                     "matched_line": matched[:200] if isinstance(matched, str) else None}
@@ -257,8 +400,174 @@ def close_pane(pane):
                 "reason": f"herdr refused to close the source pane: {detail.strip()[:200]}"}
 
 
-def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeout=25.0, keep_source=False,
-             source_cwd=None, allow_dirty=False, allow_running_subagents=False):
+_EXIT_TEXT_KEY_PAUSE_SECONDS = 0.3
+_EXIT_POLL_SECONDS = 0.5
+
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh"})
+_PS_TIMEOUT_SECONDS = 5
+
+
+def _comm_of(pid):
+    """The executable name of `pid` according to `ps`, or "" when it cannot be had."""
+    try:
+        done = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True,
+                              timeout=_PS_TIMEOUT_SECONDS, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _children_of(pid):
+    """Executable names of the processes whose parent is `pid`, or None when `ps` cannot say."""
+    try:
+        done = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True, text=True,
+                              timeout=_PS_TIMEOUT_SECONDS, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    names = []
+    for line in done.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[1] == str(pid):
+            names.append(os.path.basename(parts[2]) or parts[2])
+    return names
+
+
+def _is_pid(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def harness_exited(info, agent_present, *, comm_of=_comm_of, children_of=_children_of):
+    """Whether the pane holds nothing but an idle shell, judged from herdr's own observations.
+
+    `info` is `herdr pane process-info`'s `process_info`; `agent_present` is whether `herdr agent get`
+    reports an agent in the pane.  The answer is True only when all of these hold, and any missing datum
+    reads as False (the source keeps running):
+      - herdr reports no agent in the pane;
+      - `shell_pid` and a non-empty `foreground_processes` list are present (an idle shell is listed as
+        its own foreground process, so an empty list is not evidence of anything);
+      - every foreground process is the shell process itself;
+      - that process is a real shell by executable name.  A harness started with `exec` (or as the pane's
+        root command) has the shell's pid, so the pid alone proves nothing.
+    """
+    if agent_present is not False or not isinstance(info, dict):
+        return False
+    shell_pid, procs = info.get("shell_pid"), info.get("foreground_processes")
+    if not _is_pid(shell_pid) or not isinstance(procs, list) or not procs:
+        return False
+    if any(not isinstance(proc, dict) or proc.get("pid") != shell_pid for proc in procs):
+        return False
+    name = procs[0].get("name")
+    if not isinstance(name, str) or not name:
+        name = comm_of(shell_pid)
+    if not (isinstance(name, str) and os.path.basename(name).lstrip("-") in _SHELLS):
+        return False
+    children = children_of(shell_pid)
+    return isinstance(children, list) and not children
+
+
+def _gone(exc):
+    return "pane_not_found" in f"{exc.stdout or ''}{exc.stderr or ''}"
+
+
+def _observe(pane):
+    """(gone, process_info, agent_present) for `pane`; any herdr error but a vanished pane is raised."""
+    try:
+        reply = _herdr_json(["herdr", "pane", "process-info", "--pane", pane])
+    except subprocess.CalledProcessError as exc:
+        if _gone(exc):
+            return True, None, None
+        raise
+    info = (reply.get("result") or {}).get("process_info")
+    try:
+        agent = (_herdr_json(["herdr", "agent", "get", pane]).get("result") or {}).get("agent")
+    except subprocess.CalledProcessError as exc:
+        if _gone(exc):
+            return True, None, None
+        if "agent_not_found" not in f"{exc.stdout or ''}{exc.stderr or ''}":
+            raise
+        agent = None
+    return False, info, isinstance(agent, dict)
+
+
+def _source_evidence(pane):
+    """What herdr shows in the source pane now, for the record of a refused exit."""
+    try:
+        gone, info, agent = _observe(pane)
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return {"observed": False}
+    procs = (info or {}).get("foreground_processes")
+    names = [str(proc.get("name") or proc.get("argv0") or "?") for proc in procs if isinstance(proc, dict)] \
+        if isinstance(procs, list) else []
+    shell_pid = (info or {}).get("shell_pid")
+    children = _children_of(shell_pid) if _is_pid(shell_pid) else None
+    return {"observed": True, "gone": gone, "agent": agent, "foreground": names, "children": children}
+
+
+def exit_source(pane, *, text, keys, timeout):
+    """Ask the harness in `pane` to exit, then wait until it has.  True means nothing is left to protect.
+
+    The pane counts as exited when it is gone, or when `harness_exited` says only an idle shell is left.
+    Typing happens only when herdr reports an agent in the pane: anything else holding the foreground (an
+    editor, a REPL, a running command) must not receive an exit command, so that returns False.  The text
+    goes in first and the keys follow after a short pause: Codex drops an Enter that arrives in the same
+    instant as the text.  Any other herdr failure, or an agent still there after `timeout` seconds,
+    returns False so the caller leaves the source pane open.  A harness that is suspended (Ctrl-Z) is
+    still read as present for as long as herdr reports its agent.
+    """
+    if not isinstance(pane, str) or not pane:
+        return False
+    try:
+        gone, info, agent = _observe(pane)
+        if gone or harness_exited(info, agent):
+            return True
+        if not agent:
+            return False
+        try:
+            if text:
+                _run(["herdr", "pane", "send-text", pane, text])
+            if text and keys:
+                time.sleep(_EXIT_TEXT_KEY_PAUSE_SECONDS)
+            if keys:
+                _run(["herdr", "pane", "send-keys", pane, *keys])
+        except subprocess.CalledProcessError as exc:
+            return _gone(exc)
+        deadline = time.monotonic() + timeout
+        while True:
+            time.sleep(_EXIT_POLL_SECONDS)
+            gone, info, agent = _observe(pane)
+            if gone or harness_exited(info, agent):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return False
+
+
+def takeover(package, *, store=None, root=None, **options):
+    """Take `package` over, one process at a time per handoff; see `_takeover` for what that does.
+
+    A second process taking over the same handoff waits a few seconds and then gets `takeover_in_progress`.
+    The record is read again once the lock is held: whoever held it before may have finished the move.
+    """
+    store = store or HandoffStore(root)
+    handoff_id = package["handoff_id"]
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(store.takeover_lock(handoff_id))
+        except TakeoverInProgress:
+            return {"handoff_id": handoff_id, "status": "takeover_in_progress", "source_closed": False,
+                    "idempotent": False, "pane_id": None,
+                    "reason": "another takeover of this handoff is running; nothing was launched or closed",
+                    "hint": "wait for it to finish and rerun, which reports its outcome"}
+        return _takeover(store.get(handoff_id), store=store, **options)
+
+
+def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, keep_source=False,
+              source_cwd=None, allow_dirty=False, allow_running_subagents=False, direction="down",
+              source_exit_text=None, source_exit_keys=(), source_exit_timeout=30.0, relaunch=False):
     """Start the successor in the source pane's own tab, wait for proof it is live, close the source pane.
 
     Every step is written down before it happens, so a repeat trigger (or a crash between steps) either
@@ -271,8 +580,10 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
     judgement that the work in that worktree may be left behind.  Claude subagents still running from the
     source pane would die with it, so unless `allow_running_subagents` or `keep_source` says otherwise the
     takeover is refused before anything is launched.
+
+    When `source_exit_text` or `source_exit_keys` is given, the source harness is asked to exit and must
+    be gone before its pane is closed; if it is not, the pane stays and the status is `source_exit_failed`.
     """
-    store = store or HandoffStore(root)
     handoff_id = package["handoff_id"]
     target = package.get("target") or {}
     harness = target.get("harness")
@@ -307,6 +618,13 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                 "placement": recorded.get("placement"), "document": document, "source_closed": True,
                 "confirmed_at": recorded.get("confirmed_at"), "source_closed_at": recorded.get("source_closed_at"),
                 "reason": recorded.get("reason") or "", "idempotent": True}
+    if not child and recorded.get("phase") == "launching" and not relaunch:
+        return {"handoff_id": handoff_id, "target_harness": harness, "status": "launch_state_unknown",
+                "reason": "an earlier takeover recorded that it was placing the successor pane and never "
+                          "recorded the pane; a pane may exist that this record does not know",
+                "hint": "look for the stray pane and close it, then pass --relaunch to start over",
+                "source_pane": recorded.get("source_pane") or source_pane, "pane_id": None, "tab_id": None,
+                "placement": None, "document": document, "source_closed": False, "idempotent": False}
     if not child and not source_pane:
         raise SystemExit("takeover needs the source pane identity (HERDR_PANE_ID or --parent-pane); "
                          "use `launch` to hand off without closing anything")
@@ -321,9 +639,20 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                     "subagents": running, "source_pane": source_pane, "pane_id": None, "tab_id": None,
                     "placement": None, "document": document, "source_closed": False, "idempotent": False}
 
+    # also on a rerun: the command typed the first time is rebuilt so its echo is never taken for proof
+    plan = build_launch_plan(source_pane, harness, handoff_id, handoff_file,
+                             model_hint=target.get("model_hint"), cwd=cwd,
+                             prompt=takeover_prompt(handoff_id, document),
+                             fallback_prompt=compact_prompt(handoff_id, confirm=True),
+                             harness_binary=_harness_binary(harness), direction=direction)
     label = pane_label(cwd, (package.get("context") or {}).get("goal"), handoff_id)
+    # how this run means to close the source, kept so a later `confirm` can finish the close it was too late for
+    close_options = {"keep_source": bool(keep_source), "allow_dirty": bool(allow_dirty), "source_cwd": source_cwd,
+                     "source_exit_text": source_exit_text, "source_exit_keys": list(source_exit_keys),
+                     "source_exit_timeout": float(source_exit_timeout)}
     if child:
         pane, placement, tab_id = child, recorded.get("placement") or "split", recorded.get("tab_id")
+        store.record_takeover(handoff_id, {"close_options": close_options})
         if _pane_tab(pane) is None:
             store.record_takeover(handoff_id, {"phase": "unconfirmed", "reason": "successor pane is gone"})
             return {"handoff_id": handoff_id, "target_harness": harness, "status": "launch_unconfirmed",
@@ -331,12 +660,10 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                     "source_pane": source_pane, "placement": placement, "document": document,
                     "source_closed": False, "idempotent": True}
     else:
-        store.record_takeover(handoff_id, {"phase": "launching", "source_pane": source_pane, "reason": None})
-        plan = build_launch_plan(source_pane, harness, handoff_id, handoff_file,
-                                 model_hint=target.get("model_hint"), cwd=cwd,
-                                 prompt=takeover_prompt(handoff_id, document),
-                                 fallback_prompt=compact_prompt(handoff_id, confirm=True),
-                                 harness_binary=_harness_binary(harness))
+        launching = {"phase": "launching", "source_pane": source_pane, "reason": None}
+        if direction != "down":                 # the default stays out of the record, which older readers know
+            launching["direction"] = direction
+        store.record_takeover(handoff_id, launching)
         try:
             pane, result, placement = _place(plan, source_pane, cwd, label)
         except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError) as exc:
@@ -347,12 +674,15 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                     "command": plan["run_command"], "cwd": cwd, "document": document,
                     "source_pane": source_pane, "pane_id": None, "tab_id": None, "placement": None,
                     "source_closed": False, "idempotent": False}
+        # the pane is on record before the successor can start, so its own `confirm` finds it
+        store.record_takeover(handoff_id, {"child_pane": pane})
         _run(["herdr", "pane", "run", pane, plan["run_command"]])
         _announce_pane(pane, label=label, harness=harness, handoff_id=handoff_id)
         tab_id = _pane_tab(pane) or (result.get("tab_id") or (result.get("root_pane") or {}).get("tab_id"))
         store.record_takeover(handoff_id, {"phase": "launched", "source_pane": source_pane, "child_pane": pane,
                                            "tab_id": tab_id if isinstance(tab_id, str) else None,
-                                           "placement": placement, "reason": None})
+                                           "placement": placement, "reason": None,
+                                           "close_options": close_options})
         for state in ("claimed", "accepted", "in_progress"):
             store.transition(handoff_id, state, actor="local-takeover")
 
@@ -366,7 +696,8 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
     if block.get("confirmed_at"):
         confirmed, evidence = True, {**(block.get("evidence") or {}), "source": "confirmed record"}
     else:
-        verdict = confirm_successor(pane, harness=harness, handoff_id=handoff_id, timeout=confirm_timeout)
+        verdict = confirm_successor(pane, harness=harness, handoff_id=handoff_id, timeout=confirm_timeout,
+                                    typed_command=plan["run_command"])
         confirmed, evidence = verdict["confirmed"], verdict["evidence"]
     if not confirmed:
         detail = (f"herdr saw agent={evidence.get('agent') or 'nothing'}"
@@ -377,12 +708,35 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
                                                      "evidence": evidence})["takeover"]
         return report("launch_unconfirmed", block=refused, source_closed=False,
                       reason=f"unconfirmed: {detail}", evidence=evidence)
-    block = store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "evidence": evidence})["takeover"]
+    block = store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "evidence": evidence},
+                                  target_ids={"pane_id": pane, "session_id": _agent_session(pane)})["takeover"]
     if keep_source:
         return report("confirmed", block=block, source_closed=False)
 
+    closing = _close_source(store, handoff_id, block=block, source_pane=source_pane, child_pane=pane,
+                            tab_id=tab_id, placement=placement, options=close_options)
+    return report(closing["status"], block=closing["block"], source_closed=closing["source_closed"],
+                  reason=closing["reason"], **({"worktree": closing["worktree"]} if closing["worktree"] else {}))
+
+
+def _close_source(store, handoff_id, *, block, source_pane, child_pane, tab_id, placement, options):
+    """Close the source pane of a confirmed takeover, unless the worktree guard or the exit step says no.
+
+    Everything comes from the arguments, so `confirm` can run it from the options a takeover recorded.
+    Returns the status, whether the pane is closed, the reason, the record's block and the worktree guard.
+    """
+    pane = child_pane
+    source_cwd, allow_dirty = options.get("source_cwd"), options.get("allow_dirty")
+    source_exit_text = options.get("source_exit_text")
+    source_exit_keys = options.get("source_exit_keys") or ()
+    source_exit_timeout = options.get("source_exit_timeout", 30.0)
+
+    def result(status, block, source_closed, reason="", worktree=None):
+        return {"status": status, "source_closed": source_closed, "reason": reason, "block": block,
+                "worktree": worktree}
+
     source_tab = _pane_tab(source_pane) if source_pane else None
-    guard = None
+    guard, override = None, {}
     if source_pane and source_tab is None:  # the session being replaced is already gone: nothing to close
         closed = {"closed": True, "already": True, "reason": "source pane was already closed"}
     else:
@@ -399,21 +753,33 @@ def takeover(package, *, root, parent_pane, cwd=None, store=None, confirm_timeou
             store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": reason,
                                                "evidence": {**(block.get("evidence") or {}),
                                                             "worktree": guard}})
-            return report(status, block=block, source_closed=False, reason=reason, worktree=guard)
+            return result(status, block, False, reason, guard)
+        if (source_exit_text or source_exit_keys) and not exit_source(
+                source_pane, text=source_exit_text, keys=source_exit_keys, timeout=source_exit_timeout):
+            reason = "the source harness did not exit after the exit command; its pane was left open"
+            store.record_takeover(handoff_id, {"phase": "source_exit_failed", "child_pane": pane, "reason": reason,
+                                               "evidence": {**(block.get("evidence") or {}),
+                                                            "source_exit": _source_evidence(source_pane)}})
+            return result("source_exit_failed", block, False, reason, guard)
+        if allow_dirty and worktree_close_refusal(guard):
+            override = {"dirty_allowed": True, "unpushed_commits": unpushed_commits(guard.get("path"))}
         closed = close_pane(source_pane)
         if not closed["closed"]:
             store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": closed["reason"]})
-            return report("source_close_failed", block=block, source_closed=False, reason=closed["reason"])
+            return result("source_close_failed", block, False, closed["reason"])
     block = store.record_takeover(handoff_id, {"phase": "already_closed" if closed["already"] else "source_closed",
-                                                "child_pane": pane, "reason": closed["reason"] or None})["takeover"]
-    return report("source_closed", block=block, source_closed=True, reason=closed["reason"],
-                  **({"worktree": guard} if guard else {}))
+                                                "child_pane": pane, "reason": closed["reason"] or None,
+                                                **override})["takeover"]
+    return result("source_closed", block, True, closed["reason"], guard)
 
 
 def confirm_takeover(store, handoff_id, *, pane=None):
     """Record that the successor session confirms itself, from the pane it is actually running in."""
     package = store.get(handoff_id)
     recorded = validate_takeover(package.get("takeover")) or {}
+    if not recorded.get("child_pane"):
+        raise SystemExit("herdr-handoff: no successor pane is recorded for this handoff yet; "
+                         "confirm applies once a takeover has placed one")
     candidate = pane or os.environ.get("HERDR_PANE_ID")
     if not isinstance(candidate, str) or not _PANE_ID.fullmatch(candidate):
         raise SystemExit("confirm needs the successor pane identity (HERDR_PANE_ID or --pane)")
@@ -422,12 +788,49 @@ def confirm_takeover(store, handoff_id, *, pane=None):
     if recorded.get("source_closed_at"):
         return {"handoff_id": handoff_id, "phase": recorded["phase"], "pane_id": candidate,
                 "confirmed_at": recorded.get("confirmed_at"),
-                "source_closed_at": recorded["source_closed_at"], "idempotent": True}
+                "source_closed_at": recorded["source_closed_at"], "idempotent": True,
+                "close": _closed_kind(recorded), "source_closed": True, "reason": ""}
     block = store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": candidate,
                                                "source_pane": recorded.get("source_pane"),
                                                "evidence": {"source": "successor pane", "pane": candidate}})["takeover"]
+    close = _close_after_confirm(store, handoff_id, candidate)
+    block = close.get("block") or block
     return {"handoff_id": handoff_id, "phase": block["phase"], "pane_id": candidate,
-            "source_pane": block.get("source_pane"), "confirmed_at": block["confirmed_at"], "idempotent": False}
+            "source_pane": block.get("source_pane"), "confirmed_at": block["confirmed_at"], "idempotent": False,
+            "close": close["close"], "source_closed": close["source_closed"],
+            "source_closed_at": block.get("source_closed_at"), "reason": close["reason"]}
+
+
+def _closed_kind(block):
+    return "already_closed" if block.get("phase") == "already_closed" else "source_closed"
+
+
+def _close_after_confirm(store, handoff_id, child_pane):
+    """Close the source a takeover gave up waiting on, under the same gate; never blocks on a running takeover."""
+    def outcome(close, reason="", block=None):
+        return {"close": close, "source_closed": close in ("source_closed", "already_closed"),
+                "reason": reason, "block": block}
+
+    try:
+        with store.takeover_lock(handoff_id, wait=0):
+            block = validate_takeover(store.get(handoff_id).get("takeover")) or {}
+            if block.get("source_closed_at"):
+                return outcome(_closed_kind(block), block=block)
+            options = block.get("close_options")
+            if not options:
+                return outcome("not_attempted", "recorded by a takeover that predates confirm-side close", block)
+            if options.get("keep_source"):
+                return outcome("not_attempted", "takeover was run with --keep-source", block)
+            if not block.get("source_pane"):
+                return outcome("not_attempted", "no source pane is recorded", block)
+            closed = _close_source(store, handoff_id, block=block, source_pane=block["source_pane"],
+                                   child_pane=child_pane, tab_id=block.get("tab_id"),
+                                   placement=block.get("placement"), options=options)
+            if closed["status"] == "source_closed":
+                return outcome(_closed_kind(closed["block"]), block=closed["block"])
+            return outcome("refused", closed["reason"], store.get(handoff_id).get("takeover"))
+    except TakeoverInProgress:
+        return outcome("not_attempted", "a takeover of this handoff is running; it closes the source")
 
 
 def _sync_after_start(store, handoff_id, control_url, token):
@@ -463,7 +866,8 @@ def _load_spec(source):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="herdr-handoff")
     parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument("--root", default=_default_root())
+    parser.add_argument("--root", default=None,
+                        help="handoff root (default: see README, normally the shared store)")
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create")
     create.add_argument("--goal", required=True)
@@ -471,12 +875,18 @@ def main(argv=None):
     create.add_argument("--target-harness")
     create.add_argument("--model")
     create.add_argument("--session-id")
+    create.add_argument("--predecessor-id", help="handoff_<32 hex> of the handoff this one continues")
+    create.add_argument("--source-pane", default=os.environ.get("HERDR_PANE_ID"),
+                        help="pane the handoff is made from (default: $HERDR_PANE_ID)")
+    create.add_argument("--source-session", help="harness session id of the source")
     create.add_argument("--mission-id")
     create.add_argument("--room-id")
     create.add_argument("--remaining", action="append", default=[])
     create.add_argument("--completed", action="append", default=[])
     for flag in ("decision", "risk", "validation", "constraint", "next-command", "file", "pr", "unverified"):
         create.add_argument(f"--{flag}", action="append", default=[])
+    create.add_argument("--fallback", action="store_true",
+                        help="mark the record as written by the fallback writer (no skill/harness integration)")
     create.add_argument("--resume-point")
     create.add_argument("--repo")
     create.add_argument("--branch")
@@ -491,6 +901,12 @@ def main(argv=None):
     inspect = sub.add_parser("inspect")
     inspect.add_argument("handoff_id")
     sub.add_parser("list")
+    store_parser = sub.add_parser("store", help="manage the handoff store")
+    store_sub = store_parser.add_subparsers(dest="store_command", required=True)
+    import_parser = store_sub.add_parser("import-legacy",
+                                         help="copy per-repo .herdr/handoffs records this store lacks")
+    import_parser.add_argument("legacy_root", nargs="?", default=None,
+                               help="a legacy handoff root (default: the current repo's .herdr/handoffs)")
     transition = sub.add_parser("transition")
     transition.add_argument("handoff_id")
     transition.add_argument("state")
@@ -517,6 +933,13 @@ def main(argv=None):
                 "  subagents_running     Claude subagents launched from the source pane are still running\n"
                 "                        (checked before anything is launched; the handoff stays queued).\n"
                 "                        Wait for them or stop them, or pass --allow-running-subagents.\n"
+                "  source_exit_failed    the source harness was still running after --source-exit-text/-key;\n"
+                "                        both panes stay up, and a rerun reuses the successor.\n"
+                "  takeover_in_progress  another takeover of this handoff holds its lock (waits 5 s first);\n"
+                "                        nothing was launched or closed.  Rerun once it has finished.\n"
+                "  launch_state_unknown  an earlier takeover died after recording that it was placing the\n"
+                "                        successor and before recording the pane.  Close any stray pane,\n"
+                "                        then pass --relaunch.\n"
                 "Do not retry a refusal blindly: make the work durable (commit, push), then run takeover\n"
                 "again, or close the source anyway with --allow-dirty-source."))
     takeover_parser.add_argument("handoff_id")
@@ -526,6 +949,8 @@ def main(argv=None):
                                  help="seconds to wait for herdr to observe the successor before refusing to close")
     takeover_parser.add_argument("--keep-source", action="store_true",
                                  help="start and confirm the successor but leave the source pane running")
+    takeover_parser.add_argument("--direction", choices=sorted(DIRECTIONS), default="down",
+                                 help="where the successor pane goes relative to the source (default: down)")
     takeover_parser.add_argument("--source-cwd", default=None,
                                  help="worktree to check before closing the source pane (default: the "
                                       "directory herdr reports for that pane, else this one)")
@@ -535,12 +960,47 @@ def main(argv=None):
     takeover_parser.add_argument("--allow-running-subagents", action="store_true",
                                  help="hand off even though Claude subagents launched from the source pane "
                                       "are still running (they die when the pane closes)")
-    confirm_parser = sub.add_parser("confirm")
+    takeover_parser.add_argument("--relaunch", action="store_true",
+                                 help="start a new successor although an earlier takeover died before "
+                                      "recording its pane (status launch_state_unknown)")
+    takeover_parser.add_argument("--source-exit-text", default=None,
+                                 help=f"text typed into the source pane to make its harness exit (max "
+                                      f"{MAX_TYPED_COMMAND} bytes); sent before --source-exit-key")
+    takeover_parser.add_argument("--source-exit-key", action="append", default=[],
+                                 help="key pressed in the source pane after the text, e.g. Enter (repeatable)")
+    takeover_parser.add_argument("--source-exit-timeout", type=float, default=30.0,
+                                 help="seconds to wait for the source harness to exit before refusing to close")
+    confirm_parser = sub.add_parser(
+        "confirm", help="record the successor's acknowledgement; closes the source pane a takeover gave up waiting on",
+        description="Run from the successor pane. Records the confirmation, then closes the source pane if "
+                    "takeover stopped waiting before the successor confirmed, under the same checks as takeover "
+                    "(unpushed commits, a dirty worktree or another tab refuse). It never closes after "
+                    "--keep-source, for a record written by takeover 0.5.0, or while a takeover is running. "
+                    "The JSON carries close (source_closed, already_closed, refused or not_attempted), "
+                    "source_closed, reason and source_closed_at; exit is 0 whenever the confirmation is recorded. "
+                    "A repeated confirm retries a close that failed earlier, and it can wait up to the "
+                    "source-exit timeout while the source harness exits.")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
     args = parser.parse_args(argv)
+    shared = False
+    if args.root is None:
+        args.root, shared = _default_root()
     store = HandoffStore(args.root)
-    if args.command == "create":
+    if shared and args.command != "store":
+        _import_legacy_quietly(store)
+    if args.command == "store":
+        try:
+            imported = store.import_legacy(args.legacy_root or _legacy_root())
+        except OSError as exc:
+            print(f"herdr-handoff: legacy import failed: {exc}", file=sys.stderr)
+            return 1
+        if store.failed_legacy:
+            for name, reason in store.failed_legacy:
+                print(f"herdr-handoff: legacy import failed: {name}: {reason}", file=sys.stderr)
+            return 1
+        out = {"imported": imported, "skipped": [{"file": n, "reason": r} for n, r in store.skipped_legacy]}
+    elif args.command == "create":
         artifacts = [{"artifact_id": item} for item in args.artifact]
         refs = []
         for item in args.memory_ref:
@@ -568,11 +1028,19 @@ def main(argv=None):
                                     target_harness=args.target_harness, model_hint=args.model,
                                     session_id=args.session_id, mission_id=args.mission_id,
                                     room_id=args.room_id, memory_context=build_memory_context(refs),
+                                    provenance={"fallback": True} if args.fallback else None,
                                     workspace=workspace, report=report,
-                                    resume_point=args.resume_point or spec.get("resume_point"), **lists)
+                                    resume_point=args.resume_point or spec.get("resume_point"),
+                                    predecessor_id=args.predecessor_id, source_pane_id=args.source_pane,
+                                    source_session_id=args.source_session, **lists)
         except ValueError as exc:
             raise SystemExit(f"herdr-handoff: invalid handoff: {exc}")
         out = store.enqueue(package)
+        if args.predecessor_id:
+            warning = store.link_successor(args.predecessor_id, out["handoff_id"])
+            if warning:
+                print(f"herdr-handoff: warning: {warning}", file=sys.stderr)
+                out = {**out, "warnings": [warning]}
     elif args.command == "inspect":
         out = store.get(args.handoff_id)
     elif args.command == "list":
@@ -607,6 +1075,8 @@ def main(argv=None):
         store.transition(args.handoff_id, "in_progress", actor="local-launch")
         out["dashboard"] = _sync_after_start(store, args.handoff_id, control_url, control_token)
     elif args.command == "takeover":
+        if args.source_exit_text is not None and len(args.source_exit_text.encode()) > MAX_TYPED_COMMAND:
+            parser.error(f"--source-exit-text is over {MAX_TYPED_COMMAND} bytes, which herdr cannot type reliably")
         package = store.get(args.handoff_id)
         if package.get("state") != "queued" and not validate_takeover(package.get("takeover")):
             raise SystemExit(f"handoff must be queued before takeover (state={package.get('state')})")
@@ -618,7 +1088,9 @@ def main(argv=None):
             out = takeover(package, root=store.root, parent_pane=args.parent_pane, cwd=args.cwd, store=store,
                            confirm_timeout=args.confirm_timeout, keep_source=args.keep_source,
                            source_cwd=args.source_cwd, allow_dirty=args.allow_dirty_source,
-                           allow_running_subagents=args.allow_running_subagents)
+                           allow_running_subagents=args.allow_running_subagents, direction=args.direction,
+                           source_exit_text=args.source_exit_text, source_exit_keys=args.source_exit_key,
+                           source_exit_timeout=args.source_exit_timeout, relaunch=args.relaunch)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None      # e.g. no target harness named: say it, no traceback
         if out["status"] in ("confirmed", "source_closed"):

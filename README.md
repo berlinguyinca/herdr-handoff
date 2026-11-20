@@ -32,12 +32,17 @@ If `herdr-memory` is missing, report it unavailable without installing it.
 pane, starts the selected harness interactively in the child pane with a
 one-line prompt pointing at the full handoff document, reports the
 pane/handoff metadata for dashboard visibility, and closes the pane it replaced
-once the successor has proved itself (it runs `takeover`, so see below). Pass
-`--keep-source` to want both sessions side by side. Without `HERDR_PANE_ID` it
+once herdr observes the successor live (it runs `takeover`, so see below). Pass
+`--keep-source` to want both sessions side by side. The successor pane goes
+**below** the source by default (`--direction right` restores the old
+side-by-side split); this default changed from right to down on purpose in
+0.5.0. Without `HERDR_PANE_ID` it
 opens a tab (or workspace) in `--cwd`; without a running herdr it prints the
 exact command (`manual_launch_required`). It never starts a detached process,
 and it never closes anything without proof — a refusal leaves both panes up.
-`create` accepts `--decision`, `--risk`,
+`create --fallback` marks the record `provenance.fallback: true` (shown as "Written by the fallback
+writer" in the document). `list` skips a record that does not parse, names it on stderr and still
+exits 0. `create` accepts `--decision`, `--risk`,
 `--validation`, `--constraint`, `--next-command`, `--file`, `--pr`,
 `--resume-point`, `--repo`, `--branch`, `--worktree`, `--report` and
 `--from-json`; see `schemas/handoff-v2.schema.json`.
@@ -50,6 +55,20 @@ four harnesses with:
 ./install/install.sh
 ```
 
+## Where handoffs are stored
+
+Every repo shares one store. The root is, first match wins: `--root`, the root implied by
+`HERDR_HANDOFF_FILE` (what a successor pane inherits), `HERDR_HANDOFF_DIR`, `HERDR_HANDOFF_STORE`, then
+`~/.local/share/herdr-handoff/store`. Records written by older versions live in the repo's
+`.herdr/handoffs/outbox`; when a command uses the shared store it first copies the current repo's
+records it lacks into it (a message on stderr, nothing on stdout). A record already in the shared store
+wins, nothing in `.herdr/handoffs` is ever changed or deleted, and a corrupt legacy record is skipped and
+reported. `herdr-handoff store import-legacy [LEGACY_ROOT]` does the same on demand and prints
+`{"imported": [...], "skipped": [...]}`. Documents and the `confirm` command in them name the root that
+actually holds the record. Passing `--root` keeps the old behaviour exactly. A legacy record is copied once:
+if it is changed in `.herdr/handoffs` after the import, the shared copy is not updated, and the shared copy
+wins. `HERDR_HANDOFF_STORE` may start with `~` or `~/`, expanded from `HOME`; `~user` is not expanded.
+
 Create a handoff:
 
 ```sh
@@ -58,6 +77,11 @@ herdr-handoff create --goal "Continue the current session" \
   --remaining "Run the integration tests"
 ```
 
+Optional chain flags: `--predecessor-id handoff_<32 hex>`, `--source-pane PANE` (default `$HERDR_PANE_ID`) and
+`--source-session ID` record the handoff this one continues and where it was made from (`predecessor_id`,
+`source.pane_id`, `source.session_id`; `successor_id` and `target.pane_id`/`target.session_id` are filled later).
+The ids are never looked up, so a predecessor that no longer exists still validates.
+
 Handoffs do not launch another harness automatically. They produce a portable
 JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
@@ -65,7 +89,9 @@ JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
 ```sh
 herdr-handoff takeover HANDOFF_ID [--parent-pane PANE] [--cwd DIR] \
-  [--confirm-timeout 25] [--keep-source] [--source-cwd DIR] [--allow-dirty-source] [--allow-running-subagents]
+  [--confirm-timeout 25] [--keep-source] [--direction down|right] [--source-cwd DIR] \
+  [--allow-dirty-source] [--allow-running-subagents] \
+  [--source-exit-text TEXT] [--source-exit-key KEY ...] [--source-exit-timeout 30]
 ```
 
 `takeover` is `launch` for a session that is being replaced rather than copied:
@@ -76,9 +102,20 @@ needs proof first — herdr has to report an agent in the child pane in a settle
 state and show the handoff id in its output — and the source worktree has to
 hold nothing that exists only there. It refuses (exit 1, both panes left
 running) with statuses `launch_unconfirmed`, `launch_failed`,
-`source_close_failed`, `source_dirty`, `subagents_running`; the recorded phase is `unconfirmed` for
+`source_close_failed`, `source_dirty`, `subagents_running`, `source_exit_failed`,
+`takeover_in_progress`, `launch_state_unknown`; the recorded phase is `unconfirmed` for
 the launch refusals, and `confirmed` with the worktree reason for
 `source_dirty`.
+
+Only one `takeover` of a handoff runs at a time: it holds an exclusive lock on
+`<root>/outbox/<id>.takeover.lock` for its whole run, and a second one waits five
+seconds and then refuses with `takeover_in_progress` (exit 1) without launching or
+closing anything; rerun it once the first has finished and it reports that outcome.
+Every update of a record takes a short per-record lock (`<id>.lock`) so concurrent
+writers lose nothing. `launch_state_unknown` (exit 1) means a record is in phase
+`launching` with no child pane: an earlier takeover died after it began placing the
+successor and before it recorded the pane, so a stray pane may exist. Look for it and
+close it, then pass `--relaunch` to start over.
 
 `subagents_running` is checked first, before anything is launched: Claude subagents
 launched from the source pane that are still running (one file per subagent under
@@ -99,11 +136,49 @@ the pane sits somewhere other than the work it produced. The guard never buys
 its way past the other refusals: an unconfirmed successor still cannot close a
 pane.
 
+`--source-exit-text` / `--source-exit-key` make the close clean: just before the pane
+is closed, the text is typed into the source pane (`herdr pane send-text`), then
+after 0.3 s the keys are pressed (`herdr pane send-keys`; an Enter sent in the same
+instant as the text is dropped by Codex), and `takeover` waits up to
+`--source-exit-timeout` seconds until the harness has exited. "Exited" means the pane is gone,
+or all of these hold: `herdr agent get` reports no agent in the pane; `herdr pane process-info`
+shows a `shell_pid` and a foreground list holding only that process; that process is a real
+shell by name (sh, bash, zsh, fish, dash, ksh, tcsh, csh, nu, pwsh); and the shell has no child
+process at all (`ps -A -o pid=,ppid=,comm=`), so a harness suspended with Ctrl-Z or sent to the
+background still counts as a live session, and a `ps` failure reads as not exited. Anything missing or unknown
+reads as not exited, and so does a harness started with `exec`, whose pid is the shell's. The text
+and keys are typed only while herdr reports an agent in the pane; a pane held by anything else
+(an editor, a REPL, a command) gets nothing typed and the status is `source_exit_failed`.
+Only then is the pane closed. A harness that
+ignores the command gives `source_exit_failed` (exit 1): both panes stay, the
+recorded phase is `source_exit_failed`, and a rerun reuses the successor instead of
+launching another. A source that has already exited counts as exited. The exit
+command runs after every other refusal and only when the close would go ahead;
+without these flags the pane is closed directly, as before. The text is limited to
+900 bytes, like any typed command.
+
+When `--allow-dirty-source` actually lets a close go ahead over unsaved work, the
+takeover block records `dirty_allowed: true` and `unpushed_commits`, the short ids
+from `git rev-list HEAD --not --remotes` in the source worktree (empty when the
+directory is not a git repository), so the successor knows what exists only locally.
+
 So order a handoff this way, and nothing can be lost: make the work durable
 (commit, push, upload artifacts, file issues), create the handoff, launch the
-successor, confirm, close the source pane last.
+successor with `takeover`, which closes the source pane last, once herdr observes the successor (`confirm` is
+not a step the close waits for; if takeover gave up waiting, a later `confirm` closes the source pane).
 
-The successor confirms itself: `herdr-handoff confirm HANDOFF_ID`. The handoff
+herdr observes the successor: the harness agent is detected in the child pane in a settled
+state, and the handoff id is in the pane's output (the last 200 rows of scrollback count) other than as an
+echo of the command the launcher typed. The shell echoes that command back with the id in it, so an id whose
+surrounding text matches the typed command (behind a prompt, redrawn, wrapped over rows, or boxed with a
+border on every row) does not count; the comparison uses letters and digits only. Neither does a bare id
+alone or a bare quote of the prompt; the successor's own words around the id do. The close never waits for
+the successor to run anything. `herdr-handoff confirm HANDOFF_ID` is idempotent. It records the
+successor's own acknowledgement (it stamps the successor's pane and `confirmed_at`) and, if takeover gave up
+waiting first, closes the source pane under the same checks takeover uses (never after `--keep-source`, for a
+0.5.0 record, or while a takeover runs); its JSON reports `close`, `source_closed`, `reason` and
+`source_closed_at`, and it exits 0 whenever the confirmation is recorded. A repeated `confirm` retries a close that failed earlier, and
+`confirm` can wait up to the source-exit timeout for the source harness to exit. The handoff
 document spells the command out with the absolute root, and a pane started by a
 handoff resolves the root from `HERDR_HANDOFF_FILE`, so the short form works
 there. Every step is recorded in the package's `takeover` block (`launching` →

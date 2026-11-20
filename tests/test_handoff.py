@@ -68,7 +68,7 @@ def test_launch_plan_splits_current_pane_and_starts_target_interactively():
     plan = build_launch_plan("wC:p1", "claude", "handoff_" + "a" * 32,
                              "/tmp/handoff.json", model_hint="sonnet", cwd="/work")
     assert plan["split"][0:4] == ["herdr", "pane", "split", "wC:p1"]
-    assert "--direction" in plan["split"] and "right" in plan["split"]
+    assert plan["split"][4:6] == ["--direction", "down"]
     assert "--focus" in plan["split"]
     assert plan["run_binary"] == "claude"
     assert "--model sonnet" in plan["run_command"]

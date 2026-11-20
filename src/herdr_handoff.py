@@ -7,6 +7,8 @@ create, inspect, and pass the package to another harness.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +16,8 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import urllib.request
 from copy import deepcopy
@@ -21,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-__version__ = "0.4.0"
+__version__ = "0.5.1"
 
 _SECRET = re.compile(
     r"(?i)(bearer\s+|token\s*[=:]\s*|password\s*[=:]\s*|secret\s*[=:]\s*|api[_-]?key\s*[=:]\s*)[^\s,;]+"
@@ -60,6 +64,8 @@ def _clean(value):
     return value
 
 
+_HANDOFF_ID = re.compile(r"handoff_[a-f0-9]{32}")
+_PANE_OR_TAB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}")
 _HARNESSES = {"pi", "claude", "codex", "opencode"}
 _LIST_KEYS = ("completed", "remaining", "decisions", "risks", "validation",
               "constraints", "next_commands", "files", "unverified")
@@ -110,7 +116,7 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
                   room_id=None, source_agent_id=None, target_agent_id=None, handoff_id=None,
                   memory_context=None, workspace=None, pull_requests=None, files=None,
                   next_commands=None, constraints=None, resume_point=None, unverified=None,
-                  report=None):
+                  report=None, predecessor_id=None, source_pane_id=None, source_session_id=None):
     """Create a bounded, redacted handoff envelope suitable for any harness.
 
     The original fields keep ``schema_version`` 1.  Supplying any of the self-sufficiency fields
@@ -135,7 +141,10 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
     if resume_point is not None and not isinstance(resume_point, str):
         raise ValueError("resume_point must be a string")
     workspace, report = _clean_workspace(workspace), _clean_report(report)
-    extended = bool(any(v2.values()) or prs or resume_point or workspace or report)
+    chain = {"predecessor_id": predecessor_id}
+    ids = {k: v for k, v in (("pane_id", source_pane_id), ("session_id", source_session_id)) if v is not None}
+    extended = bool(any(v2.values()) or prs or resume_point or workspace or report
+                    or predecessor_id or source_pane_id or source_session_id)
     context = {
         "goal": goal, "completed": _text_list("completed", completed),
         "remaining": _text_list("remaining", remaining), "decisions": _text_list("decisions", decisions),
@@ -147,7 +156,7 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
         "created_at": _now(),
         "updated_at": _now(),
         "state": "draft",
-        "source": {"harness": source_harness, "agent_id": source_agent_id},
+        "source": {"harness": source_harness, "agent_id": source_agent_id, **ids},
         "target": {"harness": target_harness, "agent_id": target_agent_id,
                     "model_hint": model_hint},
         "context": context,
@@ -165,6 +174,7 @@ def build_handoff(*, goal, completed=None, remaining=None, decisions=None, risks
             raw["links"] = {"pull_requests": prs}
         if report:
             raw["report"] = report
+        raw.update({k: v for k, v in chain.items() if v is not None})
     package = _clean(raw)
     if memory_context is not None:
         # Structural ids only (validated); never passed through free-text cleaning or copied from memory.
@@ -179,7 +189,7 @@ def validate_envelope(package):
     problems = []
     if not isinstance(package, dict):
         raise ValueError("envelope must be an object")
-    if not isinstance(package.get("handoff_id"), str) or not re.fullmatch(r"handoff_[a-f0-9]{32}", package["handoff_id"]):
+    if not isinstance(package.get("handoff_id"), str) or not _HANDOFF_ID.fullmatch(package["handoff_id"]):
         problems.append("handoff_id must look like handoff_<32 hex>")
     if package.get("schema_version") not in (1, 2):
         problems.append("schema_version must be 1 or 2")
@@ -198,6 +208,17 @@ def validate_envelope(package):
         harness = (package.get(side) or {}).get("harness")
         if harness not in _HARNESSES | {None}:
             problems.append(f"{side}.harness is unsupported")
+    for key in ("predecessor_id", "successor_id"):
+        if key in package and not (isinstance(package[key], str) and _HANDOFF_ID.fullmatch(package[key])):
+            problems.append(f"{key} must look like handoff_<32 hex>")
+    for side in ("source", "target"):
+        endpoint = package.get(side) or {}
+        pane = endpoint.get("pane_id")
+        if pane is not None and not (isinstance(pane, str) and _PANE_OR_TAB_ID.fullmatch(pane)):
+            problems.append(f"{side}.pane_id must be a pane id")
+        session = endpoint.get("session_id")
+        if session is not None and not (isinstance(session, str) and session.strip()):
+            problems.append(f"{side}.session_id must be a non-empty string")
     workspace = package.get("workspace")
     if workspace is not None:
         try:
@@ -217,6 +238,9 @@ def validate_envelope(package):
             problems.append(str(exc))
     if package.get("schema_version") == 1 and any(k in package for k in ("workspace", "links", "report")):
         problems.append("schema_version 1 envelopes cannot carry workspace, links or report")
+    provenance = package.get("provenance")
+    if isinstance(provenance, dict) and "fallback" in provenance and not isinstance(provenance["fallback"], bool):
+        problems.append("provenance.fallback must be a boolean")
     try:
         validate_takeover(package.get("takeover"))
     except ValueError as exc:
@@ -468,6 +492,8 @@ def render_handoff_markdown(package):
         lines += ["## Full report"] + [f"- {key}: {report[key]}" for key in ("path", "dashboard") if key in report] + [""]
     if package.get("artifacts"):
         lines += ["## Pinned artifacts", json.dumps(package["artifacts"], sort_keys=True), ""]
+    if (package.get("provenance") or {}).get("fallback") is True:
+        lines += ["Written by the fallback writer.", ""]
     lines += ["Do not publish or expose private infrastructure without explicit approval.", ""]
     return "\n".join(lines)
 
@@ -554,8 +580,10 @@ def short_prompt(handoff_id, document):
 
 
 def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, model_hint=None, cwd=None,
-                      prompt=None, harness_binary=None, fallback_prompt=None):
+                      prompt=None, harness_binary=None, fallback_prompt=None, direction="down"):
     """Build safe Herdr CLI operations for an interactive same-tab handoff."""
+    if direction not in DIRECTIONS:
+        raise ValueError(f"direction must be one of {sorted(DIRECTIONS)}")
     if parent_pane is not None and (not isinstance(parent_pane, str)
                                     or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}", parent_pane)):
         raise ValueError("parent pane must be a valid pane id")
@@ -578,7 +606,7 @@ def build_launch_plan(parent_pane, target_harness, handoff_id, handoff_file, *, 
                       "types a longer command into a pane without the shell ever running it, so the full prompt "
                       "stays in the handoff document and in full_command")
     return {
-        "split": (["herdr", "pane", "split", parent_pane, "--direction", "right", "--focus"]
+        "split": (["herdr", "pane", "split", parent_pane, "--direction", direction, "--focus"]
                   + (["--cwd", cwd] if cwd else [])) if parent_pane else None,
         "run_binary": argv[0],
         "argv": argv,
@@ -600,13 +628,14 @@ def compact_prompt(handoff_id, *, confirm=False):
             "environment variable in full, then continue from its Resume point. Its Constraints section is "
             "binding.")
     if confirm:
-        text += (f" When you have the Resume point, run `herdr-handoff confirm {handoff_id}` so the pane you "
-                 "replaced can be closed.")
+        text += (" Once herdr observes this pane running you, its takeover closes the pane you replaced, unless the "
+                 f"close is refused; if takeover gave up, `herdr-handoff confirm {handoff_id}` closes it; safe to "
+                 "repeat.")
     return text
 
 
 def takeover_prompt(handoff_id, document, *, root=None):
-    """One-line prompt for a takeover: read the document, then confirm so the source pane can close.
+    """One-line prompt for a takeover: read the document, then `confirm`, which closes the source if takeover gave up.
 
     With no ``root`` the confirm command carries no path at all, which is what the launched pane is
     told to run: every byte of a typed command counts against what herdr can deliver, and the pane can
@@ -614,12 +643,13 @@ def takeover_prompt(handoff_id, document, *, root=None):
     """
     command = (f"herdr-handoff --root {shlex.quote(str(root))} confirm {handoff_id}" if root
                else f"herdr-handoff confirm {handoff_id}")
-    return (f"{short_prompt(handoff_id, document)} When you have the Resume point, run "
-            f"`{command}` so the pane you replaced can be closed.")
+    return (f"{short_prompt(handoff_id, document)} Once herdr observes this pane running you, its takeover closes "
+            f"the pane you replaced, unless the close is refused; if takeover gave up, `{command}` closes it; "
+            "safe to repeat.")
 
 
 TAKEOVER_PHASES = frozenset({"launching", "launched", "confirmed", "source_closed", "unconfirmed",
-                             "launch_failed", "already_closed"})
+                             "launch_failed", "already_closed", "source_exit_failed"})
 """Durable phases of a takeover, in causal order: launch, confirm, then close the source pane."""
 
 MAX_TYPED_COMMAND = 900
@@ -644,12 +674,38 @@ def _handoff_root(handoff_file):
         return os.path.dirname(parent)
     return None
 
-_PANE_OR_TAB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}")
 _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
-                            "source_closed_at", "reason", "evidence"})
+                            "source_closed_at", "reason", "evidence", "direction", "dirty_allowed",
+                            "unpushed_commits", "close_options"})
+_CLOSE_OPTION_KEYS = frozenset({"keep_source", "allow_dirty", "source_cwd", "source_exit_text",
+                                "source_exit_keys", "source_exit_timeout"})
 _TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")
 _TAKEOVER_STAMPS = ("confirmed_at", "source_closed_at")
 _PLACEMENTS = frozenset({"split", "tab", "workspace"})
+DIRECTIONS = frozenset({"down", "right"})
+
+
+def _validate_close_options(options):
+    """The close flags a later `confirm` needs, recorded at takeover time."""
+    if not isinstance(options, dict):
+        raise ValueError("takeover close_options must be an object")
+    unknown = sorted(set(options) - _CLOSE_OPTION_KEYS)
+    if unknown:
+        raise ValueError(f"takeover close_options has unsupported keys: {', '.join(unknown)}")
+    for key in ("keep_source", "allow_dirty"):
+        if key in options and not isinstance(options[key], bool):
+            raise ValueError(f"takeover close_options {key} must be a boolean")
+    for key in ("source_cwd", "source_exit_text"):
+        if options.get(key) is not None and not isinstance(options[key], str):
+            raise ValueError(f"takeover close_options {key} must be a string or null")
+    if "source_exit_keys" in options:       # the schema types both as array / number, so null is not accepted
+        keys = options["source_exit_keys"]
+        if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+            raise ValueError("takeover close_options source_exit_keys must be a list of strings")
+    if "source_exit_timeout" in options:
+        timeout = options["source_exit_timeout"]
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("takeover close_options source_exit_timeout must be a number")
 
 
 def validate_takeover(block):
@@ -681,8 +737,17 @@ def validate_takeover(block):
         raise ValueError("takeover reason must be a string")
     if block.get("placement") is not None and block["placement"] not in _PLACEMENTS:
         raise ValueError(f"takeover placement must be one of {sorted(_PLACEMENTS)}")
+    if block.get("direction") is not None and block["direction"] not in DIRECTIONS:
+        raise ValueError(f"takeover direction must be one of {sorted(DIRECTIONS)}")
     if block.get("evidence") is not None and not isinstance(block["evidence"], dict):
         raise ValueError("takeover evidence must be an object")
+    if block.get("dirty_allowed") is not None and not isinstance(block["dirty_allowed"], bool):
+        raise ValueError("takeover dirty_allowed must be a boolean")
+    shas = block.get("unpushed_commits")
+    if shas is not None and (not isinstance(shas, list) or not all(isinstance(sha, str) and sha for sha in shas)):
+        raise ValueError("takeover unpushed_commits must be a list of commit ids")
+    if block.get("close_options") is not None:
+        _validate_close_options(block["close_options"])
     return block
 
 
@@ -697,6 +762,12 @@ def _git_text(cwd, *args):
     except (OSError, ValueError, subprocess.SubprocessError):
         return False, ""
     return done.returncode == 0, (done.stdout or "").strip()
+
+
+def unpushed_commits(path):
+    """Short ids of the commits in `path`'s worktree that no remote branch holds; empty when it is no repo."""
+    ok, out = _git_text(path, "rev-list", "--abbrev-commit", "HEAD", "--not", "--remotes")
+    return out.split() if ok else []
 
 
 def _count(value):
@@ -854,13 +925,82 @@ def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confi
     return {"close": True, "reason": ""}
 
 
+def shared_store_root(env):
+    """The one handoff store every repo shares: `HERDR_HANDOFF_STORE`, else under the user's home.
+
+    A leading `~` or `~/` comes from `env["HOME"]` when present, so a caller (or a test) can move the home
+    without touching the real one.  `~user` is not expanded; it stays a literal path.
+    """
+    configured = env.get("HERDR_HANDOFF_STORE")
+    home = env.get("HOME") or os.path.expanduser("~")
+    if configured:
+        return Path(home, configured[2:]) if configured == "~" or configured.startswith("~/") else Path(configured)
+    return Path(home) / ".local" / "share" / "herdr-handoff" / "store"
+
+
+_UPDATE_LOCK_WAIT_SECONDS = 30.0
+_TAKEOVER_LOCK_WAIT_SECONDS = 5.0
+
+
+class TakeoverInProgress(RuntimeError):
+    """Another process is taking this handoff over right now."""
+
+
 class HandoffStore:
     """Filesystem-backed outbox with atomic writes and state transition checks."""
 
     def __init__(self, root):
         self.root = Path(root).expanduser()
+        self.skipped_legacy = []
+        self.failed_legacy = []
         self.outbox = self.root / "outbox"
         self.outbox.mkdir(parents=True, exist_ok=True)
+
+    @contextlib.contextmanager
+    def _flock(self, name, *, wait):
+        """Hold an exclusive `flock` on `<outbox>/<name>` for the block, waiting at most `wait` seconds.
+
+        The lock belongs to the open file, so it goes away with the process that holds it, however that
+        process ends.  Raises `TimeoutError` when the wait runs out.
+        """
+        descriptor = os.open(self.outbox / name, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(name) from None
+                    time.sleep(0.02)
+            yield
+        finally:
+            os.close(descriptor)
+
+    @contextlib.contextmanager
+    def locked(self, *handoff_ids):
+        """Exclusive access to the records `handoff_ids` for a read-modify-write.
+
+        Locks are taken in sorted id order, so two callers touching the same pair cannot deadlock.  Hold
+        it only around the update itself; a whole takeover uses `takeover_lock` instead, so a successor's
+        `confirm` is never kept waiting behind it.
+        """
+        with contextlib.ExitStack() as stack:
+            for handoff_id in sorted(set(handoff_ids)):
+                self._path(handoff_id)
+                stack.enter_context(self._flock(f"{handoff_id}.lock", wait=_UPDATE_LOCK_WAIT_SECONDS))
+            yield
+
+    @contextlib.contextmanager
+    def takeover_lock(self, handoff_id, *, wait=_TAKEOVER_LOCK_WAIT_SECONDS):
+        """Held for the whole of a takeover of `handoff_id`; `TakeoverInProgress` if another one is running."""
+        self._path(handoff_id)
+        try:
+            with self._flock(f"{handoff_id}.takeover.lock", wait=wait):
+                yield
+        except TimeoutError:
+            raise TakeoverInProgress(handoff_id) from None
 
     def _path(self, handoff_id):
         if not re.fullmatch(r"handoff_[a-f0-9]{32}", handoff_id):
@@ -879,23 +1019,35 @@ class HandoffStore:
         if not handoff_id:
             raise ValueError("handoff_id is required")
         path = self._path(handoff_id)
-        if path.is_file():
-            return self.get(handoff_id)
-        package["state"] = "queued"
-        package["updated_at"] = _now()
-        package["history"] = [{"state": "queued", "actor": "local", "at": package["updated_at"]}]
-        self._write(path, package)
+        with self.locked(handoff_id):
+            if path.is_file():
+                return self.get(handoff_id)
+            package["state"] = "queued"
+            package["updated_at"] = _now()
+            package["history"] = [{"state": "queued", "actor": "local", "at": package["updated_at"]}]
+            self._write(path, package)
         return package
 
-    def record_takeover(self, handoff_id, changes, *, state=None, actor="local-takeover"):
+    def record_takeover(self, handoff_id, changes, *, state=None, actor="local-takeover", target_ids=None):
         """Persist the takeover block (merging `changes`) and, when asked, the handoff state.
 
         Stamps are written here rather than by the caller: `confirmed_at` and `source_closed_at` are the
         durable proof of what actually happened, and a re-run must be able to trust them after a crash.
         A phase of `confirmed` or `source_closed` stamps its own time once and never restamps it.
+        `target_ids` (pane_id / session_id of the successor) are written into the envelope's `target`.
         """
+        with self.locked(handoff_id):
+            return self._record_takeover(handoff_id, changes, state, actor, target_ids)
+
+    def _record_takeover(self, handoff_id, changes, state, actor, target_ids):
         package = self.get(handoff_id)
+        ids = {k: v for k, v in (target_ids or {}).items() if v is not None}
+        if ids:
+            package["target"] = {**(package.get("target") or {}), **ids}
+            package["schema_version"] = 2
         block = dict(validate_takeover(package.get("takeover")) or {})
+        if block.get("source_closed_at") and changes.get("phase") == "confirmed":
+            changes = {k: v for k, v in changes.items() if k != "phase"}   # a closed source never goes back
         block = {**block, **changes}
         block.setdefault("version", 1)
         phase = block.get("phase")
@@ -915,19 +1067,121 @@ class HandoffStore:
         self._write(self._path(handoff_id), package)
         return package
 
+    def import_legacy(self, legacy_root):
+        """Copy the per-repo records this store lacks from `<legacy_root>/outbox`; return the imported ids.
+
+        A record already here wins and is never touched, so an import is idempotent and cannot duplicate.
+        The legacy store is only read.  A record that is not valid JSON, or whose id is not its file name,
+        is skipped and listed in `self.skipped_legacy` as `(file name, reason)`; one that could not be
+        written here is listed in `self.failed_legacy` the same way, so a later command tries it again.
+        """
+        self.skipped_legacy = []
+        self.failed_legacy = []
+        source = Path(legacy_root).expanduser() / "outbox"
+        if not source.is_dir() or source.resolve() == self.outbox.resolve():
+            return []
+        imported = []
+        for path in sorted(source.glob("handoff_*.json")):
+            if (self.outbox / path.name).exists():
+                continue
+            try:
+                raw = path.read_bytes()
+                record = json.loads(raw)
+                if not isinstance(record, dict) or record.get("handoff_id") != path.stem:
+                    raise ValueError("handoff_id does not match the file name")
+                self._path(path.stem)
+            except (OSError, ValueError) as exc:
+                self.skipped_legacy.append((path.name, f"{type(exc).__name__}: {exc}"))
+                continue
+            try:
+                if self._import_one(raw, self.outbox / path.name):
+                    imported.append(path.stem)
+            except OSError as exc:
+                self.failed_legacy.append((path.name, f"{type(exc).__name__}: {exc}"))
+        return imported
+
+    def _import_one(self, raw, destination):
+        """Put `raw` at `destination` whole or not at all, never replacing a record; False if one is there.
+
+        The bytes go to a temp file that is linked into place, so a reader never sees half a record.  A
+        filesystem without hard links gets an exclusive create of the destination instead.
+        """
+        descriptor, temp = tempfile.mkstemp(dir=self.outbox, prefix=".import-", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+            try:
+                os.link(temp, destination)               # fails, never replaces, if a record appeared meanwhile
+            except FileExistsError:
+                return False
+            except OSError:                              # no hard links here (FAT, some network mounts)
+                return self._create_exclusive(raw, destination)
+            return True
+        finally:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _create_exclusive(raw, destination):
+        """Write `raw` to a new `destination`; False, and nothing touched, if it already exists."""
+        try:
+            fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+        except OSError:
+            os.unlink(destination)                       # never leave a half-written record behind
+            raise
+        return True
+
+    def link_successor(self, predecessor_id, successor_id):
+        """Record on the predecessor that `successor_id` continues it; return a warning if that cannot be done.
+
+        A predecessor this store lacks or cannot read is reported and left alone: the successor is valid
+        without the back-link.  Idempotent.
+        """
+        try:
+            self.get(predecessor_id)         # no lock file is made for a record this store does not have
+            with self.locked(predecessor_id):
+                package = self.get(predecessor_id)
+                if package.get("successor_id") == successor_id:
+                    return None
+                package["successor_id"] = successor_id
+                package["schema_version"] = 2
+                package["updated_at"] = _now()
+                self._write(self._path(predecessor_id), package)
+        except KeyError:
+            return f"predecessor {predecessor_id} is not in this store ({self.root}); it was not linked to {successor_id}"
+        except (OSError, ValueError) as exc:
+            return f"predecessor {predecessor_id} could not be updated ({type(exc).__name__}: {exc}); it was not linked"
+        return None
+
     def transition(self, handoff_id, state, *, actor):
-        package = self.get(handoff_id)
-        old = package["state"]
-        if state not in _STATES.get(old, set()):
-            raise ValueError(f"invalid transition: {old} -> {state}")
-        package["state"] = state
-        package["updated_at"] = _now()
-        package.setdefault("history", []).append({"state": state, "actor": actor, "at": package["updated_at"]})
-        self._write(self._path(handoff_id), package)
+        with self.locked(handoff_id):
+            package = self.get(handoff_id)
+            old = package["state"]
+            if state not in _STATES.get(old, set()):
+                raise ValueError(f"invalid transition: {old} -> {state}")
+            package["state"] = state
+            package["updated_at"] = _now()
+            package.setdefault("history", []).append({"state": state, "actor": actor, "at": package["updated_at"]})
+            self._write(self._path(handoff_id), package)
         return package
 
     def list(self):
-        return [self.get(path.stem) for path in sorted(self.outbox.glob("handoff_*.json"))]
+        """Every record that parses; one that does not is named on stderr and left in place."""
+        packages = []
+        for path in sorted(self.outbox.glob("handoff_*.json")):
+            try:
+                packages.append(self.get(path.stem))
+            except (ValueError, OSError) as exc:
+                print(f"herdr-handoff: skipping unreadable record {path.name}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+        return packages
 
     def sync(self, base_url, *, token=None, handoff_id=None):
         """Upload queued packages to a Herdr API; local state is unchanged on failure."""
@@ -972,14 +1226,26 @@ class HandoffStore:
         ``HERDR_HANDOFF_FILE``), so the full command - the one that works from any shell, in any cwd -
         belongs here, in the document the successor has to read anyway.
         """
-        return ("\n## Releasing the pane this handoff replaces\n\n"
-                "Once you have the Resume point from this document, run:\n\n"
-                f"```sh\nherdr-handoff --root {shlex.quote(str(self.root.resolve()))} confirm {handoff_id}\n```\n\n"
-                "Until you do, the pane this handoff came from stays open on purpose.\n")
+        return ("\n## Confirming this handoff\n\n"
+                "herdr observes this pane itself and closes the pane this handoff replaced once it sees you "
+                "running.  Run the command below once you have the Resume point: it records the confirmation "
+                "and, if takeover gave up waiting before it saw you, closes the replaced pane under the same "
+                "checks.  It is safe to run again:\n\n"
+                f"```sh\nherdr-handoff --root {shlex.quote(str(self.root.resolve()))} confirm {handoff_id}\n```\n")
 
     @staticmethod
     def _write(path, package):
-        temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(package, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temp.replace(path)
+        """Replace `path` with `package` atomically: a unique temp file next to it, fsynced, then renamed."""
+        text = json.dumps(package, indent=2, sort_keys=True) + "\n"
+        descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=".write-", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp)
+            raise
 

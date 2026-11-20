@@ -9,6 +9,8 @@
     "handoff_id": {"type": "string", "pattern": "^handoff_[a-f0-9]{32}$"},
     "schema_version": {"enum": [1, 2]},
     "state": {"enum": ["draft", "queued", "claimed", "accepted", "in_progress", "completed", "rejected", "cancelled", "expired", "failed"]},
+    "predecessor_id": {"$ref": "#/$defs/handoff_id"},
+    "successor_id": {"$ref": "#/$defs/handoff_id"},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"},
     "source": {"$ref": "#/$defs/endpoint"},
@@ -51,6 +53,7 @@
       "additionalProperties": false,
       "properties": {"path": {"type": "string", "pattern": "^/"}, "dashboard": {"type": "string"}}
     },
+    "provenance": {"type": "object", "properties": {"fallback": {"type": "boolean"}}},
     "artifacts": {"type": "array"},
     "memory_context": {"type": "object"},
     "redaction": {"type": "object"},
@@ -60,25 +63,45 @@
       "required": ["version", "phase"],
       "properties": {
         "version": {"const": 1},
-        "phase": {"enum": ["launching", "launched", "confirmed", "source_closed", "unconfirmed", "launch_failed", "already_closed"]},
+        "phase": {"enum": ["launching", "launched", "confirmed", "source_closed", "unconfirmed", "launch_failed", "already_closed", "source_exit_failed"]},
         "source_pane": {"$ref": "#/$defs/pane_or_tab_id"},
         "child_pane": {"$ref": "#/$defs/pane_or_tab_id"},
         "tab_id": {"$ref": "#/$defs/pane_or_tab_id"},
         "placement": {"enum": ["split", "tab", "workspace"]},
+        "direction": {"enum": ["down", "right"]},
         "confirmed_at": {"type": "string", "minLength": 1},
         "source_closed_at": {"type": "string", "minLength": 1},
         "reason": {"type": "string"},
-        "evidence": {"type": "object"}
+        "evidence": {"type": "object"},
+        "dirty_allowed": {"type": "boolean"},
+        "unpushed_commits": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "close_options": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keep_source": {"type": "boolean"},
+            "allow_dirty": {"type": "boolean"},
+            "source_cwd": {"type": ["string", "null"]},
+            "source_exit_text": {"type": ["string", "null"]},
+            "source_exit_keys": {"type": "array", "items": {"type": "string"}},
+            "source_exit_timeout": {"type": "number"}
+          }
+        }
       }
     },
     "history": {"type": "array"}
   },
   "$defs": {
     "strings": {"type": "array", "items": {"type": "string"}},
+    "handoff_id": {"type": "string", "pattern": "^handoff_[a-f0-9]{32}$"},
     "pane_or_tab_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:_.-]{0,39}$"},
     "endpoint": {
       "type": "object",
-      "properties": {"harness": {"enum": ["pi", "claude", "codex", "opencode", null]}}
+      "properties": {
+        "harness": {"enum": ["pi", "claude", "codex", "opencode", null]},
+        "pane_id": {"$ref": "#/$defs/pane_or_tab_id"},
+        "session_id": {"type": "string", "minLength": 1}
+      }
     }
   }
 }
