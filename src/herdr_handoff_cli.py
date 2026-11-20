@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, TakeoverInProgress, __version__,
+from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, TakeoverInProgress, __version__, pane_label,
                             build_handoff, build_launch_plan, build_memory_context, compact_prompt,
                             decide_takeover_close, resolve_memory_refs, resume_prompt, running_subagents,
                             shared_store_root, short_prompt, source_worktree_state, takeover_prompt,
@@ -72,7 +72,7 @@ def _announce_pane(pane, *, label, harness, handoff_id):
     """Label the pane and register the handoff as its agent session, so herdr can show and detect it."""
     _run(["herdr", "pane", "rename", pane, label])
     _run(["herdr", "pane", "report-metadata", pane, "--source", "herdr-handoff",
-          "--title", f"handoff -> {harness}", "--token", f"handoff_id={handoff_id}"])
+          "--title", label, "--token", f"handoff_id={handoff_id}"])
     _run(["herdr", "pane", "report-agent-session", pane, "--source", "herdr-handoff",
           "--agent", harness, "--agent-session-id", handoff_id, "--session-start-source", "herdr-handoff"])
 
@@ -178,7 +178,7 @@ def launch(package, *, root, parent_pane, cwd=None, store=None):
               "resume_command": f"herdr-handoff --root {shlex.quote(str(root))} resume {package['handoff_id']}"}
     if not shutil.which("herdr"):
         return {**manual, "reason": "herdr is not installed; run the command in a terminal"}
-    label = f"to-{harness}-{package['handoff_id'][-8:]}"
+    label = pane_label(cwd, (package.get("context") or {}).get("goal"), package["handoff_id"])
     try:
         pane, result, placement = _place(plan, parent_pane, cwd, label)
     except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError) as exc:
@@ -645,7 +645,7 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
                              prompt=takeover_prompt(handoff_id, document),
                              fallback_prompt=compact_prompt(handoff_id, confirm=True),
                              harness_binary=_harness_binary(harness), direction=direction)
-    label = f"to-{harness}-{handoff_id[-8:]}"
+    label = pane_label(cwd, (package.get("context") or {}).get("goal"), handoff_id)
     # how this run means to close the source, kept so a later `confirm` can finish the close it was too late for
     close_options = {"keep_source": bool(keep_source), "allow_dirty": bool(allow_dirty), "source_cwd": source_cwd,
                      "source_exit_text": source_exit_text, "source_exit_keys": list(source_exit_keys),
