@@ -665,11 +665,34 @@ def _handoff_root(handoff_file):
 
 _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "tab_id", "placement", "confirmed_at",
                             "source_closed_at", "reason", "evidence", "direction", "dirty_allowed",
-                            "unpushed_commits"})
+                            "unpushed_commits", "close_options"})
+_CLOSE_OPTION_KEYS = frozenset({"keep_source", "allow_dirty", "source_cwd", "source_exit_text",
+                                "source_exit_keys", "source_exit_timeout"})
 _TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")
 _TAKEOVER_STAMPS = ("confirmed_at", "source_closed_at")
 _PLACEMENTS = frozenset({"split", "tab", "workspace"})
 DIRECTIONS = frozenset({"down", "right"})
+
+
+def _validate_close_options(options):
+    """The close flags a later `confirm` needs, recorded at takeover time."""
+    if not isinstance(options, dict):
+        raise ValueError("takeover close_options must be an object")
+    unknown = sorted(set(options) - _CLOSE_OPTION_KEYS)
+    if unknown:
+        raise ValueError(f"takeover close_options has unsupported keys: {', '.join(unknown)}")
+    for key in ("keep_source", "allow_dirty"):
+        if key in options and not isinstance(options[key], bool):
+            raise ValueError(f"takeover close_options {key} must be a boolean")
+    for key in ("source_cwd", "source_exit_text"):
+        if options.get(key) is not None and not isinstance(options[key], str):
+            raise ValueError(f"takeover close_options {key} must be a string or null")
+    keys = options.get("source_exit_keys")
+    if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) for k in keys)):
+        raise ValueError("takeover close_options source_exit_keys must be a list of strings")
+    timeout = options.get("source_exit_timeout")
+    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))):
+        raise ValueError("takeover close_options source_exit_timeout must be a number")
 
 
 def validate_takeover(block):
@@ -710,6 +733,8 @@ def validate_takeover(block):
     shas = block.get("unpushed_commits")
     if shas is not None and (not isinstance(shas, list) or not all(isinstance(sha, str) and sha for sha in shas)):
         raise ValueError("takeover unpushed_commits must be a list of commit ids")
+    if block.get("close_options") is not None:
+        _validate_close_options(block["close_options"])
     return block
 
 

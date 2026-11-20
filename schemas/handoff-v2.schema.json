@@ -74,7 +74,19 @@
         "reason": {"type": "string"},
         "evidence": {"type": "object"},
         "dirty_allowed": {"type": "boolean"},
-        "unpushed_commits": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        "unpushed_commits": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "close_options": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keep_source": {"type": "boolean"},
+            "allow_dirty": {"type": "boolean"},
+            "source_cwd": {"type": ["string", "null"]},
+            "source_exit_text": {"type": ["string", "null"]},
+            "source_exit_keys": {"type": "array", "items": {"type": "string"}},
+            "source_exit_timeout": {"type": "number"}
+          }
+        }
       }
     },
     "history": {"type": "array"}

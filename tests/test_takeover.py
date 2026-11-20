@@ -557,3 +557,21 @@ def test_takeover_splits_below_by_default_and_leaves_it_out_of_the_record(live_h
         [herdr, "pane", "list"], env=full, capture_output=True, text=True).stdout)["result"]["panes"]}
     child = json.loads(done.stdout)["pane_id"]
     assert shown[child].get("tab_id") == shown[source].get("tab_id")
+
+
+_CLOSE_OPTIONS = {"keep_source": False, "allow_dirty": True, "source_cwd": "/work/repo",
+                  "source_exit_text": "/exit", "source_exit_keys": ["Enter"], "source_exit_timeout": 5.0}
+
+
+def test_the_takeover_block_accepts_close_options():
+    block = {"version": 1, "phase": "launched", "close_options": dict(_CLOSE_OPTIONS)}
+    assert validate_takeover(block)["close_options"] == _CLOSE_OPTIONS
+    nulls = dict(_CLOSE_OPTIONS, source_cwd=None, source_exit_text=None, source_exit_keys=[])
+    assert validate_takeover({"version": 1, "phase": "launched", "close_options": nulls})
+
+
+def test_the_takeover_block_rejects_bad_close_options():
+    for bad in ("x", {**_CLOSE_OPTIONS, "force": True}, {**_CLOSE_OPTIONS, "keep_source": "yes"},
+                {**_CLOSE_OPTIONS, "source_exit_keys": "Enter"}, {**_CLOSE_OPTIONS, "source_exit_timeout": "5"}):
+        with pytest.raises(ValueError):
+            validate_takeover({"version": 1, "phase": "launched", "close_options": bad})
