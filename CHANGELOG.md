@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0 - 2026-11-21
+
+### Added
+- `herdr-handoff reap [--apply] [--include-unrecorded]` closes the panes that confirmed handoffs replaced and that
+  are still open: the backlog, and any handoff whose `confirm` could not close (a takeover held the lock, the source
+  agent was still working). A handoff is a candidate when its successor is confirmed and no record says its source
+  pane is closed. It is a dry run unless `--apply` is given: it prints, per handoff, `would_close`, `closed`,
+  `already_closed` or `skipped` with the reason, and changes nothing. Each close goes through the same gate as a
+  confirm-side close (takeover lock, `--keep-source`, worktree guard, source exit), so it is not a second copy of the
+  policy. A record from before close options were stored is skipped until `--include-unrecorded`, because its
+  `--keep-source` choice is unknown. With no running herdr server `reap` exits 1 and touches nothing.
+- Closes made after the takeover (`confirm` and `reap`) now also refuse when the source pane is still `working`
+  (`source_working`), is the pane the command runs in (`source_is_caller`), holds a different terminal than the
+  takeover recorded (`source_pane_reused`), or when the successor pane no longer exists (`successor_gone`). The
+  reason is recorded in the handoff's takeover block and shown in `confirm`'s `reason` (`close: refused`).
+  `takeover` itself is unchanged: it runs inside the source pane, which is busy by definition.
+- `takeover` records the source pane's terminal id in `close_options.source_terminal_id` (the schema gains the key).
+  Older records have none; for them the terminal check is skipped and the other three checks still apply.
+
 ## 0.5.1 - 2026-11-19
 
 ### Fixed

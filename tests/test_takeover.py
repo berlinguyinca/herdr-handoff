@@ -608,7 +608,10 @@ def test_takeover_records_its_close_options(live_herdr_server, tmp_path):
                                  "--source-exit-text", "/exit", "--source-exit-key", "Enter"),
                    env={**env, "HERDR_PANE_ID": source})
     assert done.returncode == 0, done.stdout + done.stderr
-    assert source_state(root, package["handoff_id"])["takeover"]["close_options"] == {
+    recorded = source_state(root, package["handoff_id"])["takeover"]["close_options"]
+    terminal = recorded.pop("source_terminal_id")      # the identity of the pane being replaced, checked by reap
+    assert terminal.startswith("term_")
+    assert recorded == {
         "keep_source": True, "allow_dirty": False, "source_cwd": None, "source_exit_text": "/exit",
         "source_exit_keys": ["Enter"], "source_exit_timeout": 30.0}
 
