@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- CI: opt-in per-PR Opus agent review workflow (`.woodpecker/opus-review.yaml`); stays pending until the review host and secret are set up.
+
 ## 0.5.1 - 2026-11-19
 
 ### Fixed
