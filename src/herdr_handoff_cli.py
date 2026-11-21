@@ -18,7 +18,7 @@ from pathlib import Path
 
 from herdr_handoff import (DIRECTIONS, MAX_TYPED_COMMAND, HandoffStore, TakeoverInProgress, __version__, pane_label,
                             build_handoff, build_launch_plan, build_memory_context, compact_prompt,
-                            decide_takeover_close, resolve_memory_refs, resume_prompt, running_subagents,
+                            decide_takeover_close, live_pane_refusal, resolve_memory_refs, resume_prompt, running_subagents,
                             shared_store_root, short_prompt, source_worktree_state, takeover_prompt,
                             unpushed_commits, worktree_close_refusal, validate_takeover, _handoff_root)
 
@@ -234,6 +234,12 @@ def _pane_tab(pane):
     view = _pane_view(pane)
     tab = (view or {}).get("tab_id")
     return tab if isinstance(tab, str) else None
+
+
+def _pane_terminal(pane):
+    """The terminal herdr keeps inside `pane`: what tells a pane that was reused from the one that was meant."""
+    terminal = (_pane_view(pane) or {}).get("terminal_id") if pane else None
+    return terminal if isinstance(terminal, str) and terminal else None
 
 
 def _pane_cwd(pane):
@@ -649,7 +655,9 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
     # how this run means to close the source, kept so a later `confirm` can finish the close it was too late for
     close_options = {"keep_source": bool(keep_source), "allow_dirty": bool(allow_dirty), "source_cwd": source_cwd,
                      "source_exit_text": source_exit_text, "source_exit_keys": list(source_exit_keys),
-                     "source_exit_timeout": float(source_exit_timeout)}
+                     "source_exit_timeout": float(source_exit_timeout),
+                     "source_terminal_id": (recorded.get("close_options") or {}).get("source_terminal_id")
+                     or _pane_terminal(source_pane)}
     if child:
         pane, placement, tab_id = child, recorded.get("placement") or "split", recorded.get("tab_id")
         store.record_takeover(handoff_id, {"close_options": close_options})
@@ -719,10 +727,25 @@ def _takeover(package, *, parent_pane, cwd=None, store, confirm_timeout=25.0, ke
                   reason=closing["reason"], **({"worktree": closing["worktree"]} if closing["worktree"] else {}))
 
 
-def _close_source(store, handoff_id, *, block, source_pane, child_pane, tab_id, placement, options):
+_LIVE_REFUSAL_HINTS = {
+    "source_is_caller": "this process runs in the source pane, which cannot close itself",
+    "successor_gone": "the successor pane no longer exists, so the source is the only live session",
+    "source_pane_reused": "the source pane now holds a different terminal than the handoff replaced",
+    "source_working": "the source agent is still working; run reap again once it is idle",
+}
+
+
+def _live_refusal_reason(token, source_pane):
+    return f"{token}: {source_pane} {_LIVE_REFUSAL_HINTS[token]}; the source pane was left running"
+
+
+def _close_source(store, handoff_id, *, block, source_pane, child_pane, tab_id, placement, options,
+                  live_checks=False, dry_run=False):
     """Close the source pane of a confirmed takeover, unless the worktree guard or the exit step says no.
 
     Everything comes from the arguments, so `confirm` can run it from the options a takeover recorded.
+    `live_checks` adds the checks of a close made after the takeover (`live_pane_refusal`); `dry_run` runs
+    every check, changes nothing and reports `would_close` where it would have closed.
     Returns the status, whether the pane is closed, the reason, the record's block and the worktree guard.
     """
     pane = child_pane
@@ -735,11 +758,25 @@ def _close_source(store, handoff_id, *, block, source_pane, child_pane, tab_id, 
         return {"status": status, "source_closed": source_closed, "reason": reason, "block": block,
                 "worktree": worktree}
 
-    source_tab = _pane_tab(source_pane) if source_pane else None
+    def record(changes):
+        if not dry_run:
+            store.record_takeover(handoff_id, changes)
+
+    source_view = _pane_view(source_pane) if source_pane else None
+    source_tab = (source_view or {}).get("tab_id")
     guard, override = None, {}
     if source_pane and source_tab is None:  # the session being replaced is already gone: nothing to close
         closed = {"closed": True, "already": True, "reason": "source pane was already closed"}
+        if dry_run:
+            return result("would_close", block, False, "source pane is already gone; the record would be marked closed")
     else:
+        token = live_checks and live_pane_refusal(
+            source_pane=source_pane, source_view=source_view, child_view=_pane_view(pane),
+            caller_pane=os.environ.get("HERDR_PANE_ID"), recorded_terminal=options.get("source_terminal_id"))
+        if token:
+            reason = _live_refusal_reason(token, source_pane)
+            record({"phase": "confirmed", "child_pane": pane, "reason": reason})
+            return result("source_kept", block, False, reason)
         guard = source_worktree_state(source_cwd or _pane_cwd(source_pane) or os.getcwd())
         decision = decide_takeover_close(placement=placement, same_tab=source_tab is not None
                                          and source_tab == tab_id, source_pane=source_pane, child_pane=pane,
@@ -750,10 +787,11 @@ def _close_source(store, handoff_id, *, block, source_pane, child_pane, tab_id, 
             dirty = decision["reason"].startswith("worktree_")
             status = "source_dirty" if dirty else "launch_unconfirmed"
             reason = _worktree_refusal_reason(decision["reason"], guard) if dirty else decision["reason"]
-            store.record_takeover(handoff_id, {"phase": "confirmed", "child_pane": pane, "reason": reason,
-                                               "evidence": {**(block.get("evidence") or {}),
-                                                            "worktree": guard}})
+            record({"phase": "confirmed", "child_pane": pane, "reason": reason,
+                    "evidence": {**(block.get("evidence") or {}), "worktree": guard}})
             return result(status, block, False, reason, guard)
+        if dry_run:
+            return result("would_close", block, False, "", guard)
         if (source_exit_text or source_exit_keys) and not exit_source(
                 source_pane, text=source_exit_text, keys=source_exit_keys, timeout=source_exit_timeout):
             reason = "the source harness did not exit after the exit command; its pane was left open"
@@ -805,8 +843,12 @@ def _closed_kind(block):
     return "already_closed" if block.get("phase") == "already_closed" else "source_closed"
 
 
-def _close_after_confirm(store, handoff_id, child_pane):
-    """Close the source a takeover gave up waiting on, under the same gate; never blocks on a running takeover."""
+def _close_after_confirm(store, handoff_id, child_pane, *, unrecorded_options=None, dry_run=False):
+    """Close the source a takeover gave up waiting on, under the same gate; never blocks on a running takeover.
+
+    `unrecorded_options` stands in for the close options a record from before they were stored lacks; only
+    `reap --include-unrecorded` passes it, since the operator's `--keep-source` cannot be known for those.
+    """
     def outcome(close, reason="", block=None):
         return {"close": close, "source_closed": close in ("source_closed", "already_closed"),
                 "reason": reason, "block": block}
@@ -817,20 +859,67 @@ def _close_after_confirm(store, handoff_id, child_pane):
             if block.get("source_closed_at"):
                 return outcome(_closed_kind(block), block=block)
             options = block.get("close_options")
-            if not options:
-                return outcome("not_attempted", "recorded by a takeover that predates confirm-side close", block)
+            if options is None:
+                options = unrecorded_options
+            if options is None:
+                return outcome("not_attempted", "recorded by a takeover that predates confirm-side close "
+                                                "(`reap --include-unrecorded` can still close it)", block)
             if options.get("keep_source"):
                 return outcome("not_attempted", "takeover was run with --keep-source", block)
             if not block.get("source_pane"):
                 return outcome("not_attempted", "no source pane is recorded", block)
             closed = _close_source(store, handoff_id, block=block, source_pane=block["source_pane"],
                                    child_pane=child_pane, tab_id=block.get("tab_id"),
-                                   placement=block.get("placement"), options=options)
+                                   placement=block.get("placement"), options=options, live_checks=True,
+                                   dry_run=dry_run)
+            if closed["status"] == "would_close":
+                return outcome("would_close", closed["reason"], block)
             if closed["status"] == "source_closed":
                 return outcome(_closed_kind(closed["block"]), block=closed["block"])
             return outcome("refused", closed["reason"], store.get(handoff_id).get("takeover"))
     except TakeoverInProgress:
         return outcome("not_attempted", "a takeover of this handoff is running; it closes the source")
+
+
+def _reap_candidates(store):
+    """Records whose successor is proven live and whose source pane no record says is closed."""
+    for package in store.list():
+        try:
+            block = validate_takeover(package.get("takeover")) or {}
+        except ValueError:
+            continue
+        if block.get("confirmed_at") and block.get("child_pane") and not block.get("source_closed_at"):
+            yield package["handoff_id"], block
+
+
+def _reap_row(handoff_id, block, outcome):
+    action = {"source_closed": "closed", "already_closed": "already_closed",
+              "would_close": "would_close"}.get(outcome["close"], "skipped")
+    return {"handoff_id": handoff_id, "source_pane": block.get("source_pane"),
+            "successor_pane": block["child_pane"], "action": action, "reason": outcome["reason"]}
+
+
+def reap(store, *, apply=False, include_unrecorded=False):
+    """Close the panes that confirmed handoffs replaced, through the gate `confirm` uses; a dry run by default.
+
+    Each candidate goes through `_close_after_confirm`: the same lock, `--keep-source` rule, worktree guard
+    and live-pane checks as a confirm-side close, so nothing here is a second copy of the policy.  Without a
+    herdr server a pane cannot be told from a closed one, so then nothing is touched.
+    """
+    try:
+        _herdr_json(["herdr", "pane", "list"])
+    except (subprocess.CalledProcessError, ValueError, OSError) as exc:
+        raise SystemExit(f"herdr-handoff: reap needs a running herdr server ({type(exc).__name__}); "
+                         "no pane was touched") from None
+    results = [_reap_row(handoff_id, block,
+                         _close_after_confirm(store, handoff_id, block["child_pane"], dry_run=not apply,
+                                              unrecorded_options={} if include_unrecorded else None))
+               for handoff_id, block in _reap_candidates(store)]
+    counts = {}
+    for row in results:
+        counts[row["action"]] = counts.get(row["action"], 0) + 1
+    return {"mode": "apply" if apply else "dry_run", "root": str(store.root), "counts": counts,
+            "results": results}
 
 
 def _sync_after_start(store, handoff_id, control_url, token):
@@ -982,6 +1071,18 @@ def main(argv=None):
                     "source-exit timeout while the source harness exits.")
     confirm_parser.add_argument("handoff_id")
     confirm_parser.add_argument("--pane", default=os.environ.get("HERDR_PANE_ID"))
+    reap_parser = sub.add_parser(
+        "reap", help="close the panes confirmed handoffs replaced (dry run unless --apply)",
+        description="Find handoffs whose successor confirmed and whose source pane is still open, and close "
+                    "those panes through the checks confirm uses: --keep-source is respected, the source "
+                    "worktree must be clean and pushed, the pane must hold the terminal the takeover recorded, "
+                    "must not be working, must not be the pane this runs in, and the successor must still "
+                    "exist. A refusal is recorded in the handoff and listed with its reason; nothing is forced. "
+                    "Without --apply it only lists what it would close and why the others are skipped.")
+    reap_parser.add_argument("--apply", action="store_true", help="close the panes (default: list only)")
+    reap_parser.add_argument("--include-unrecorded", action="store_true",
+                             help="also consider records from before close options were stored; their "
+                                  "--keep-source choice is unknown, so check the panes before using this")
     args = parser.parse_args(argv)
     shared = False
     if args.root is None:
@@ -1097,6 +1198,8 @@ def main(argv=None):
             out["dashboard"] = _sync_after_start(store, args.handoff_id, control_url, control_token)
         print(json.dumps(out, indent=2, sort_keys=True))
         return 1 if out["status"] in _TAKEOVER_REFUSAL_STATUSES else 0
+    elif args.command == "reap":
+        out = reap(store, apply=args.apply, include_unrecorded=args.include_unrecorded)
     elif args.command == "confirm":
         out = confirm_takeover(store, args.handoff_id, pane=args.pane)
     else:

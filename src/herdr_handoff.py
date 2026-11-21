@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 _SECRET = re.compile(
     r"(?i)(bearer\s+|token\s*[=:]\s*|password\s*[=:]\s*|secret\s*[=:]\s*|api[_-]?key\s*[=:]\s*)[^\s,;]+"
@@ -678,7 +678,7 @@ _TAKEOVER_KEYS = frozenset({"version", "phase", "source_pane", "child_pane", "ta
                             "source_closed_at", "reason", "evidence", "direction", "dirty_allowed",
                             "unpushed_commits", "close_options"})
 _CLOSE_OPTION_KEYS = frozenset({"keep_source", "allow_dirty", "source_cwd", "source_exit_text",
-                                "source_exit_keys", "source_exit_timeout"})
+                                "source_exit_keys", "source_exit_timeout", "source_terminal_id"})
 _TAKEOVER_PANES = ("source_pane", "child_pane", "tab_id")
 _TAKEOVER_STAMPS = ("confirmed_at", "source_closed_at")
 _PLACEMENTS = frozenset({"split", "tab", "workspace"})
@@ -695,7 +695,7 @@ def _validate_close_options(options):
     for key in ("keep_source", "allow_dirty"):
         if key in options and not isinstance(options[key], bool):
             raise ValueError(f"takeover close_options {key} must be a boolean")
-    for key in ("source_cwd", "source_exit_text"):
+    for key in ("source_cwd", "source_exit_text", "source_terminal_id"):
         if options.get(key) is not None and not isinstance(options[key], str):
             raise ValueError(f"takeover close_options {key} must be a string or null")
     if "source_exit_keys" in options:       # the schema types both as array / number, so null is not accepted
@@ -923,6 +923,27 @@ def decide_takeover_close(*, placement, same_tab, source_pane, child_pane, confi
         if refusal:
             return {"close": False, "reason": refusal}
     return {"close": True, "reason": ""}
+
+
+def live_pane_refusal(*, source_pane, source_view, child_view, caller_pane, recorded_terminal):
+    """The reason a source pane may not be closed *now*, or "" - the checks a close needs once the moment
+    of the takeover has passed (`confirm`, `reap`), judged on herdr's current view of both panes.
+
+    The takeover itself skips these: it runs inside the source pane, which is busy by definition.  Later,
+    the pane id alone is no proof of what is in it, so the pane must still hold the terminal that was
+    recorded, must not be mid-turn, must not be the pane this very process runs in, and the successor
+    that justifies the close must still be there.  A record from before terminals were recorded has no
+    identity to compare, so only the other three checks apply to it.
+    """
+    if caller_pane and caller_pane == source_pane:
+        return "source_is_caller"
+    if child_view is None:
+        return "successor_gone"
+    if recorded_terminal and (source_view or {}).get("terminal_id") != recorded_terminal:
+        return "source_pane_reused"
+    if (source_view or {}).get("agent_status") == "working":
+        return "source_working"
+    return ""
 
 
 def shared_store_root(env):

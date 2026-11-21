@@ -82,6 +82,12 @@ dirty worktree or another tab; the pane stays open), or `not_attempted` (`--keep
 source pane, or a takeover still running). It exits 0 whenever the confirmation is recorded. A repeated `confirm`
 retries a close that failed earlier, and `confirm` can wait up to the source-exit timeout for the source harness to exit.
 
+`confirm` also refuses (`close: refused`) while the source pane is still `working`, if it now holds a different
+terminal than the takeover recorded, or if the successor is gone; the reason is recorded in the handoff. For panes
+`confirm` could not close, and for older handoffs, `herdr-handoff reap` lists what it would close (dry run); with
+`--apply` it closes them under the same checks, and `--include-unrecorded` adds records from before close options
+were stored.
+
 Pass `--keep-source` when the user wants both sessions side by side ("open a
 Claude in parallel", "don't close this one"). It is the only form that leaves
 the source pane running on success; a refusal leaves it running too, and a

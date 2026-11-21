@@ -85,6 +85,24 @@ The ids are never looked up, so a predecessor that no longer exists still valida
 Handoffs do not launch another harness automatically. They produce a portable
 JSON package that can be claimed, reviewed, synchronized, and resumed safely.
 
+### Reap: close the panes confirmed handoffs replaced
+
+```sh
+herdr-handoff [--root DIR] reap [--apply] [--include-unrecorded]
+```
+
+`confirm` closes the replaced pane when it can; `reap` is for the ones it could not (a takeover held the lock, the
+source agent was still working) and for the backlog. It lists every handoff whose successor is confirmed and whose
+source pane no record says is closed, and without `--apply` only reports. JSON:
+`{"mode": "dry_run"|"apply", "root", "counts", "results": [{"handoff_id", "source_pane", "successor_pane",
+"action", "reason"}]}`, where `action` is `would_close`, `closed`, `already_closed` or `skipped`. The close uses
+the same checks as takeover plus, for any close made after the takeover (`confirm` too): the source pane must hold
+the terminal the takeover recorded (`source_pane_reused`), must not be `working` (`source_working`), must not be
+the pane the command runs in (`source_is_caller`), and the successor must still exist (`successor_gone`).
+`--keep-source` is respected. Records from before close options were stored are skipped unless
+`--include-unrecorded`. A refusal is recorded in the handoff and never forced; run `reap` again later.
+It needs a running herdr server and exits 1 without it. Nothing runs it on a schedule.
+
 ### Takeover: replace the pane you are in
 
 ```sh

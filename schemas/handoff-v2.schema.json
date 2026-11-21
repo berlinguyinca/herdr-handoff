@@ -84,7 +84,8 @@
             "source_cwd": {"type": ["string", "null"]},
             "source_exit_text": {"type": ["string", "null"]},
             "source_exit_keys": {"type": "array", "items": {"type": "string"}},
-            "source_exit_timeout": {"type": "number"}
+            "source_exit_timeout": {"type": "number"},
+            "source_terminal_id": {"type": ["string", "null"]}
           }
         }
       }
